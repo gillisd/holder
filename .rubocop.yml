@@ -1,0 +1,185 @@
+# ===========================================================================
+# RuboCop Configuration
+#
+# Base: Stock RuboCop defaults
+# AI guardrails: rubocop-claude plugin (all Claude/ cops + stricter metrics)
+# Performance: rubocop-performance (with chain-hostile cops disabled)
+#
+# Philosophy: idiomatic Ruby, pipeline-style chaining, strict for AI agents,
+# readable for humans.
+# ===========================================================================
+
+plugins:
+  - rubocop-claude
+  - rubocop-rspec
+  - rubocop-performance
+  - rubocop-rake
+
+AllCops:
+  NewCops: enable
+  TargetRubyVersion: 4.0
+  Exclude:
+    - bin/*
+    - vendor/**/*
+    - lib/core_ext/**/*
+    - rakelib/project.rb
+    - rakelib/project_version.rb
+    - rakelib/version_tag.rb
+    - rakelib/github_release.rb
+    - rakelib/strict_shell.rb
+
+# ===========================================================================
+# Overrides from stock — personal style preferences
+# ===========================================================================
+
+# Double quotes everywhere. One less decision to make.
+Style/StringLiterals:
+  EnforcedStyle: double_quotes
+
+Style/StringLiteralsInInterpolation:
+  EnforcedStyle: double_quotes
+
+# Frozen string literal is transitional cruft. Ruby 3.4 has chilled strings,
+# full default freeze is coming in a future Ruby.
+Style/FrozenStringLiteralComment:
+  EnforcedStyle: never
+
+# Pipeline style. Chaining multi-line blocks is the whole point.
+Style/MultilineBlockChain:
+  Enabled: false
+
+# Block delimiters are a taste call. Pipeline code uses braces for chaining,
+# do/end for side effects. No cop captures this nuance.
+Style/BlockDelimiters:
+  Enabled: false
+
+# Write arrays like arrays.
+Style/WordArray:
+  Enabled: false
+
+Style/SymbolArray:
+  Enabled: false
+
+# Argument indentation: consistent 2-space indent, not aligned to first arg.
+Layout/FirstArgumentIndentation:
+  EnforcedStyle: consistent
+
+# Dot-aligned chaining. Dots form a visual column.
+Layout/MultilineMethodCallIndentation:
+  EnforcedStyle: aligned
+
+# ===========================================================================
+# Overrides from rubocop-claude — loosen where pipeline style conflicts
+# ===========================================================================
+
+Claude/NoOverlyDefensiveCode:
+  MaxSafeNavigationChain: 2
+
+Style/SafeNavigation:
+  MaxChainLength: 2
+
+# Allow `return a, b` for tuple-style returns.
+Style/RedundantReturn:
+  AllowMultipleReturnValues: true
+
+# ===========================================================================
+# Overrides from rubocop-performance — disable chain-hostile cops
+# ===========================================================================
+
+Performance/ChainArrayAllocation:
+  Enabled: false
+
+Performance/MapMethodChain:
+  Enabled: false
+
+# ===========================================================================
+# Additional tightening — not set by stock or rubocop-claude
+# ===========================================================================
+
+# Short blocks push toward small chained steps instead of fat lambdas.
+Metrics/BlockLength:
+  Max: 8
+  CountAsOne:
+    - array
+    - hash
+    - heredoc
+    - method_call
+  AllowedMethods:
+    - command
+    - describe
+    - context
+    - shared_examples
+    - shared_examples_for
+    - shared_context
+  Exclude:
+    - "holder.gemspec"
+    - "rakelib/**/*"
+
+# Gemspec and rake files use patterns that trigger Claude cops legitimately.
+Claude/NoFancyUnicode:
+  Exclude:
+    - "holder.gemspec"
+
+Claude/MysteryRegex:
+  Exclude:
+    - "rakelib/**/*"
+
+# Zeitwerk loaders are mutable by design — only flag literal mutable values.
+Style/MutableConstant:
+  EnforcedStyle: literals
+
+# Shared test contexts legitimately define many helpers.
+RSpec/MultipleMemoizedHelpers:
+  Max: 10
+
+# Anonymous forwarding (*, **, &) breaks TruffleRuby, JRuby, and
+# Ruby < 3.2. Named args are explicit and portable.
+Style/ArgumentsForwarding:
+  Enabled: false
+
+# Explicit begin/rescue/end is clearer than implicit method-body rescue.
+Style/RedundantBegin:
+  Enabled: false
+
+# Compact class names are fine for small files and tests.
+Style/ClassAndModuleChildren:
+  Enabled: false
+
+# Classes get rdoc.
+Style/Documentation:
+  Enabled: true
+  Exclude:
+    - "spec/**/*"
+
+# Trailing commas in multiline literals and arguments.
+Style/TrailingCommaInArrayLiteral:
+  EnforcedStyleForMultiline: comma
+
+Style/TrailingCommaInHashLiteral:
+  EnforcedStyleForMultiline: comma
+
+Style/TrailingCommaInArguments:
+  EnforcedStyleForMultiline: comma
+
+# ===========================================================================
+# RSpec — rubocop-rspec overrides
+# ===========================================================================
+
+# Not every describe block wraps a class.
+RSpec/DescribeClass:
+  Enabled: false
+
+# Subject placement is a readability call, not a rule.
+RSpec/LeadingSubject:
+  Enabled: false
+
+# Block style for expect { }.to change { } reads like a sentence.
+RSpec/ExpectChange:
+  EnforcedStyle: block
+
+RSpec/NamedSubject:
+  Enabled: false
+
+# have_file_content matcher accepts a filename string in expect()
+RSpec/ExpectActual:
+  Enabled: false
