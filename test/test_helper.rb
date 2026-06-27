@@ -1,7 +1,6 @@
-ENV["MT_NO_PLUGINS"] = "1" unless ENV["RM_INFO"]
-
+unless ENV["RM_INFO"]
+  require "minitest/reporters"
+  Minitest::Reporters.use! [Minitest::Reporters::DefaultReporter.new(color: true)]
+end
 require "minitest/autorun"
-require "minitest/reporters"
-Minitest::Reporters.use! [Minitest::Reporters::DefaultReporter.new(color: true)]
-
 require "holder"
