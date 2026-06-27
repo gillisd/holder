@@ -1,8 +1,8 @@
 require "bundler/gem_tasks"
 
-require "rspec/core/rake_task"
+require "minitest/test_task"
 
-RSpec::Core::RakeTask.new(:spec)
+Minitest::TestTask.create
 
 require "rubocop/rake_task"
 RuboCop::RakeTask.new
@@ -21,4 +21,4 @@ namespace :zeitwerk do
   end
 end
 
-task default: [:spec, :rubocop]
+task default: [:test, :rubocop]

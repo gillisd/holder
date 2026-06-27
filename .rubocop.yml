@@ -11,7 +11,7 @@
 
 plugins:
   - rubocop-claude
-  - rubocop-rspec
+  - rubocop-minitest
   - rubocop-performance
   - rubocop-rake
 
@@ -106,11 +106,7 @@ Metrics/BlockLength:
     - method_call
   AllowedMethods:
     - command
-    - describe
-    - context
-    - shared_examples
-    - shared_examples_for
-    - shared_context
+    - test
   Exclude:
     - "holder.gemspec"
     - "rakelib/**/*"
@@ -128,8 +124,9 @@ Claude/MysteryRegex:
 Style/MutableConstant:
   EnforcedStyle: literals
 
-# Shared test contexts legitimately define many helpers.
-RSpec/MultipleMemoizedHelpers:
+# Minitest tests can legitimately need many assertions per method
+# when verifying multi-step operations.
+Minitest/MultipleAssertions:
   Max: 10
 
 # Anonymous forwarding (*, **, &) breaks TruffleRuby, JRuby, and
@@ -149,7 +146,7 @@ Style/ClassAndModuleChildren:
 Style/Documentation:
   Enabled: true
   Exclude:
-    - "spec/**/*"
+    - "test/**/*"
 
 # Trailing commas in multiline literals and arguments.
 Style/TrailingCommaInArrayLiteral:
@@ -161,25 +158,3 @@ Style/TrailingCommaInHashLiteral:
 Style/TrailingCommaInArguments:
   EnforcedStyleForMultiline: comma
 
-# ===========================================================================
-# RSpec — rubocop-rspec overrides
-# ===========================================================================
-
-# Not every describe block wraps a class.
-RSpec/DescribeClass:
-  Enabled: false
-
-# Subject placement is a readability call, not a rule.
-RSpec/LeadingSubject:
-  Enabled: false
-
-# Block style for expect { }.to change { } reads like a sentence.
-RSpec/ExpectChange:
-  EnforcedStyle: block
-
-RSpec/NamedSubject:
-  Enabled: false
-
-# have_file_content matcher accepts a filename string in expect()
-RSpec/ExpectActual:
-  Enabled: false
