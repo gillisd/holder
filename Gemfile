@@ -12,3 +12,7 @@ gem "rubocop-claude"
 gem "rubocop-minitest"
 gem "rubocop-performance"
 gem "rubocop-rake"
+
+source "vendor/vendored.gemv", type: :vault do
+  gem 'rubocop-design'
+end
