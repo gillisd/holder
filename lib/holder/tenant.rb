@@ -4,22 +4,23 @@ require 'open3'
 
 module Holder
   class Tenant
-    attr_reader :stdio, :pgroup
+    attr_reader :handle, :pgroup, :kwargs
     private attr_reader :args
-    private attr_writer :stdio
+    private attr_writer :handle
 
-    def initialize(*args, pgroup: true)
+    def initialize(*args, in: nil, out: nil, err: nil, pgroup: true, **kwargs)
       @args = args
-      @stdio = nil
+      @io_defs = { in:, out:, err: }
       @pgroup = pgroup
+      @kwargs = kwargs
     end
 
-    def run(in: nil, out: nil, err: nil, **kwargs)
+    def run
       # Validate and read the three streams in one shot. The pattern match is
       # also how we read in: -- it's a keyword, so it can't be named as a local;
       # an alternative pattern with an outer binding both checks "IO or nil" and
       # binds the value.
-      case { in: nil, out: nil, err: nil }.merge(in:, out:, err:)
+      case { in: nil, out: nil, err: nil }.merge(@io_defs)
       in { in: (StreamType | nil) => u_sin,
         out: (StreamType | nil) => u_sout,
         err: (StreamType | nil) => u_serr }
@@ -44,7 +45,7 @@ module Holder
       # form (the handle owns teardown).
       if block_given?
         Open3.public_send(meth, *args, pgroup:, **combined_kwargs) do |*streams|
-          handle = build_handle(streams, meth, u_sin, u_sout, u_serr)
+          self.handle = build_handle(streams, meth, u_sin, u_sout, u_serr)
           begin
             yield handle
           ensure
@@ -53,7 +54,7 @@ module Holder
         end
       else
         streams = Open3.public_send(meth, *args, **kwargs, pgroup:, **spawn_redirects)
-        build_handle(streams, meth, u_sin, u_sout, u_serr)
+        self.handle = build_handle(streams, meth, u_sin, u_sout, u_serr)
       end
     end
 
@@ -74,7 +75,7 @@ module Holder
       pumps << pump(sout_pipe, u_sout) if u_sout
       # a redirected err: went direct via popen2 -- no pump
 
-      self.stdio = Handle.new(
+      Handle.new(
         # hide the internal pipe for any stream you redirected; you talk to your IO
         stdin: u_sin ? nil : sin_pipe,
         stdout: u_sout ? nil : sout_pipe,
