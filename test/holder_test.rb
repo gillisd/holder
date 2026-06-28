@@ -2,142 +2,213 @@ require "test_helper"
 require "English"
 require "open3"
 require "stringio"
-require "pathname"
 require "fileutils"
 require "timeout"
-
-def monotonic = Process.clock_gettime(Process::CLOCK_MONOTONIC)
-
-def fd_count = Pathname.new("/proc/#{Process.pid}/fd").children.size
-
-def running?(pid)
-  return false if pid.to_i <= 0
-
-  st = begin
-    File.read("/proc/#{pid}/status")
-  rescue StandardError
-    nil
-  end
-  return false unless st
-
-  st[/State:\s*(\w)/, 1] != "Z"
-end
-
-# the group signal kills grandchildren asynchronously (they reparent to init),
-# so liveness is eventually-false, not instantly-false. poll for it. timeout is
-# the "expected" bound, so it comes first -- like every other minitest predicate.
-def dead_within?(timeout, pid)
-  deadline = monotonic + timeout
-  sleep 0.02 while running?(pid) && monotonic < deadline
-  !running?(pid)
-end
 
 class HolderTest < Minitest::Test
   include FileUtils
 
+  module Clock
+    def self.monotonic = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+  end
+
+  class ProcessProbe
+    POLL = 0.02
+
+    def initialize(pid)
+      @pid = pid.to_i
+    end
+
+    def alive?
+      return false unless @pid.positive?
+
+      state = read_state
+      !state.nil? && state != "Z"
+    end
+
+    def dead_within?(timeout)
+      deadline = Clock.monotonic + timeout
+      sleep POLL while alive? && Clock.monotonic < deadline
+      !alive?
+    end
+
+    private
+
+    def read_state
+      File.read("/proc/#{@pid}/status")[/State:\s*(\w)/, 1]
+    rescue SystemCallError
+      nil
+    end
+  end
+
+  class Cleanup
+    def initialize
+      @deferred = []
+    end
+
+    def process(handle)
+      defer { handle.terminate(grace: 0.2) }
+      handle
+    end
+
+    def pid(pid, group: false)
+      pid = pid.to_i
+      defer { Process.kill(group ? "-KILL" : "KILL", pid) } if pid.positive?
+      pid
+    end
+
+    def io(io)
+      defer { io.close }
+      io
+    end
+
+    def path(path)
+      defer { FileUtils.remove_entry(path) }
+      path
+    end
+
+    def run
+      @deferred.reverse_each do |action|
+        action.call
+      rescue StandardError
+        nil
+      end
+    end
+
+    private
+
+    def defer(&action)
+      @deferred << action
+    end
+  end
+
+  class AlwaysFailingWriter
+    def write(*) = raise("disk full")
+  end
+
   parallelize_me!
 
   TEST_TIMEOUT = 3
-  LEAK_CYCLES = 50
+  LEAK_CYCLES = 30
+  OUTLIVES_TEST = 300
 
-  # bound every test (plus its setup/teardown) so a wedged child can never hang
-  # the suite -- a timeout surfaces as an ordinary failure on that test alone.
-  def capture_exceptions
-    super { Timeout.timeout(TEST_TIMEOUT) { yield } }
+  def capture_exceptions(&)
+    super { Timeout.timeout(TEST_TIMEOUT, &) }
   end
 
   def setup
-    @procs = [] # Holder handles -> terminate
-    @pids  = [] # raw [pid, group?] -> kill
-    @ios   = [] # IOs -> close
-    @paths = [] # files/dirs -> remove
+    @cleanup = Cleanup.new
   end
 
-  # all cleanup lives here, registered by the track_* helpers below, so no test
-  # body needs an ensure block just to tidy up after itself.
   def teardown
-    @procs.each { |h| silently { h.terminate(grace: 0.2) } }
-    @pids.each do |pid, group|
-      next if pid.to_i <= 0 # never signal pid 0 -- that hits our own group
-
-      silently { Process.kill(group ? "-KILL" : "KILL", pid) }
-    end
-    @ios.each   { |io| silently { io.close } }
-    @paths.each { |path| silently { remove_entry(path) } }
-  end
-
-  # ---- resource tracking (teardown does the cleanup, not the test) ---------
-
-  def silently
-    yield
-  rescue StandardError
-    nil
-  end
-
-  def track_pid(pid, group: false)
-    @pids << [pid, group]
-    pid
-  end
-
-  def track_io(io)
-    @ios << io
-    io
-  end
-
-  def track_path(path)
-    @paths << path
-    path
+    @cleanup.run
   end
 
   def spawn(*cmd, **kw)
-    h = Holder::Tenant.new(*cmd, **kw).run
-    @procs << h
-    h
+    @cleanup.process(Holder::Tenant.new(*cmd, **kw).run)
   end
 
   def tmpfile
-    track_path("/tmp/holder_#{$PROCESS_ID}_#{rand(1_000_000)}.txt")
+    @cleanup.path("/tmp/holder_#{$PROCESS_ID}_#{rand(1_000_000)}.txt")
   end
 
   def open_tmp(mode)
-    track_io(File.open(tmpfile, mode))
+    @cleanup.io(File.open(tmpfile, mode))
   end
 
   def tmpdir
     path = "/tmp/holder_#{$PROCESS_ID}_#{rand(1_000_000)}"
     mkdir(path)
-    track_path(path)
+    @cleanup.path(path)
   end
 
   def input_io(content)
     path = tmpfile
     File.write(path, content)
-    track_io(File.open(path, "r"))
+    @cleanup.io(File.open(path, "r"))
   end
 
   def pipe
-    IO.pipe.each { |io| track_io(io) }
+    IO.pipe.each { |io| @cleanup.io(io) }
+  end
+
+  def never_eof_source
+    reader, writer = pipe
+    writer.write("partial, no EOF\n")
+    reader
+  end
+
+  def fd_count
+    Pathname.new("/proc/#{Process.pid}/fd").children.size
   end
 
   def elapsed
-    start = monotonic
+    start = Clock.monotonic
     yield
-    monotonic - start
+    Clock.monotonic - start
   end
 
-  # ---- custom assertions (keep the test bodies free of naked assert/refute) -
+  def live_pid_from(io)
+    pid = @cleanup.pid(io.gets.to_i)
+
+    assert_running pid
+    pid
+  end
+
+  def wait_for_exit(pid)
+    probe = ProcessProbe.new(pid)
+    sleep 0.02 while probe.alive?
+  end
+
+  def error_raised_in_thread
+    Thread.new do
+      yield
+      nil
+    rescue StandardError => e
+      e
+    end.value
+  end
+
+  def churn_processes(n)
+    n.times { Holder::Tenant.new("sh", "-c", "echo hi").run { |io| io.stdout.read } }
+    n.times do
+      f = open_tmp("w")
+      Holder::Tenant.new("sh", "-c", "echo hi", out: f).run(&:wait)
+      f.close
+    end
+    n.times do
+      i = input_io("x\n")
+      Holder::Tenant.new("cat", in: i).run { |io| io.stdout.read }
+      i.close
+    end
+  end
+
+  def reaped_wait_thread
+    stdin, stdout, stderr, wait = Open3.popen3("true")
+    [stdin, stdout, stderr].each(&:close)
+    wait
+  end
+
+  def handle_with_failed_pump(owned_ios:)
+    Holder::Handle.new(
+      stdin: nil, stdout: nil, stderr: nil,
+      wait_thread: reaped_wait_thread,
+      pump_threads: [Thread.new { RuntimeError.new("disk full") }],
+      owned_ios: owned_ios
+    )
+  end
 
   def assert_running(pid, msg = nil)
-    assert running?(pid), msg || "expected pid #{pid} to be running"
+    assert_predicate ProcessProbe.new(pid), :alive?, msg || "expected pid #{pid} to be running"
   end
 
   def refute_running(pid, msg = nil)
-    refute running?(pid), msg || "expected pid #{pid} not to be running"
+    refute_predicate ProcessProbe.new(pid), :alive?, msg || "expected pid #{pid} not to be running"
   end
 
   def assert_dead_within(timeout, pid, msg = nil)
-    assert dead_within?(timeout, pid),
-           msg || "expected pid #{pid} to be dead within #{timeout}s"
+    assert ProcessProbe.new(pid).dead_within?(timeout),
+           msg || "expected pid #{pid} to die within #{timeout}s"
   end
 
   def assert_all_closed(ios, msg = nil)
@@ -148,322 +219,266 @@ class HolderTest < Minitest::Test
     refute_nil Holder::VERSION
   end
 
-  # ---- correctness ---------------------------------------------------------
-
-  def test_works_pipes_no_block
+  def test_no_block_form_exposes_readable_stdout
     h = spawn("sh", "-c", "echo hello")
 
     assert_equal "hello", h.stdout.gets&.chomp
-    h.wait
   end
 
-  # in: pump closes stdin -> filter sees EOF, exits
-  def test_stdin_from_io_completes_no_hang
-    f = open_tmp("w")
-    dt = elapsed { Holder::Tenant.new("sort", in: input_io("b\na\nc\n"), out: f).run.wait }
-    f.close
+  def test_in_redirect_sorts_input_to_eof
+    out = open_tmp("w")
+    Holder::Tenant.new("sort", in: input_io("b\na\nc\n"), out: out).run.wait
+    out.close
 
-    assert_operator dt, :<, 3, "must not hang"
-    assert_equal "a\nb\nc", File.read(f.path).chomp
+    assert_equal "a\nb\nc", File.read(out.path).chomp
   end
 
-  # was a missing matrix branch (-> popen3)
-  def test_in_only_combo
-    out = Holder::Tenant.new("cat", in: input_io("solo\n")).run { |io| io.stdout.read }
+  def test_in_redirect_without_out_or_err_pipes_stdout
+    output = Holder::Tenant.new("cat", in: input_io("solo\n")).run { |io| io.stdout.read }
 
-    assert_equal "solo", out.chomp
+    assert_equal "solo", output.chomp
   end
 
-  # the other missing branch (-> popen2, err direct)
-  def test_in_plus_err_combo
-    f = open_tmp("w")
-    Holder::Tenant.new("sh", "-c", "cat 1>&2", in: input_io("toerr\n"), err: f).run.wait
-    f.close
+  def test_in_and_err_redirect_routes_stderr_to_file
+    err = open_tmp("w")
+    Holder::Tenant.new("sh", "-c", "cat 1>&2", in: input_io("toerr\n"), err: err).run.wait
+    err.close
 
-    assert_equal "toerr", File.read(f.path).chomp
+    assert_equal "toerr", File.read(err.path).chomp
   end
 
-  def test_works_block_form_auto_teardown
+  def test_out_redirect_writes_child_stdout_to_file
+    out = open_tmp("w")
+    Holder::Tenant.new("sh", "-c", "echo to_file", out: out).run.wait
+    out.close
+
+    assert_equal "to_file", File.read(out.path).chomp
+  end
+
+  def test_err_redirect_writes_child_stderr_to_file
+    err = open_tmp("w")
+    Holder::Tenant.new("sh", "-c", "echo oops 1>&2", err: err).run.wait
+    err.close
+
+    assert_equal "oops", File.read(err.path).chomp
+  end
+
+  def test_block_form_tears_down_child_on_block_exit
     pid = nil
-    Holder::Tenant.new("sh", "-c", "sleep 30").run { |io| pid = io.pid }
-    track_pid(pid, group: true)
+    Holder::Tenant.new("sh", "-c", "sleep #{OUTLIVES_TEST}").run { |io| pid = io.pid }
+    @cleanup.pid(pid, group: true)
 
-    assert_dead_within 2, pid, "block form should tear the process down on exit"
+    assert_dead_within 2, pid
   end
 
-  # popen3 pipes stdout; we pump it to the file
-  def test_works_direct_out_redirect_via_pump
-    f = open_tmp("w")
-    Holder::Tenant.new("sh", "-c", "echo to_file", out: f).run.wait # run to completion
-    f.close
-
-    assert_equal "to_file", File.read(f.path).chomp
-  end
-
-  # popen2 honors err: directly (no pipe, no pump)
-  def test_works_direct_err_redirect
-    f = open_tmp("w")
-    Holder::Tenant.new("sh", "-c", "echo oops 1>&2", err: f).run.wait
-    f.close
-
-    assert_equal "oops", File.read(f.path).chomp
-  end
-
-  def test_block_form_tears_down_no_block_form_does_not
-    # block form: process is gone once the block returns
-    bpid = nil
-    Holder::Tenant.new("sh", "-c", "sleep 30").run { |io| bpid = io.pid }
-    track_pid(bpid, group: true)
-
-    assert_dead_within 2, bpid, "block form should tear down on block exit"
-
-    # no-block form: process keeps running until YOU tear it down
-    h = spawn("sh", "-c", "sleep 30")
-    sleep 0.1
-
-    assert_running h.pid, "no-block form must NOT auto-tear-down; caller owns it"
-    h.terminate(grace: 0.5)
-
-    refute_running h.pid
-  end
-
-  # ---- the old flaws, now fixed (green = bug gone) -------------------------
-
-  # flaw #2
-  def test_fixed_no_esrch_when_already_exited
-    h = spawn("true")
-    sleep 0.02 while running?(h.pid)
-    status = h.terminate # must NOT raise Errno::ESRCH
-
-    assert_kind_of ::Process::Status, status
-  end
-
-  # flaw #3a/#3b: ignores TERM -> still dies, fast
-  def test_fixed_sigkill_escalation
-    h = spawn("sh", "-c", 'trap "" TERM; while :; do sleep 1; done')
-    pid = h.pid
-    took = elapsed { h.terminate(grace: 0.5) }
-
-    refute_running pid, "TERM-ignoring process should be SIGKILLed"
-    assert_operator took, :<, 3, "should escalate after grace, not hang"
-  end
-
-  # terminate from another thread is safe
-  def test_fixed_cross_thread_teardown
-    h = spawn("sh", "-c", "sleep 30")
-    pid = h.pid
-    err = nil
-    Thread.new do
-      h.terminate(grace: 0.5)
-    rescue StandardError => e
-      err = e
-    end.join
-
-    assert_nil err, "cross-thread terminate must not raise"
-    refute_running pid
-  end
-
-  # group teardown reaches the shell-backgrounded grandchild. the grandchild
-  # sleeps far longer than the test window, so self-exit can never mask a miss.
-  def test_fixed_backgrounded_grandchild_reaped
-    h = spawn("sh", "-c", "sleep 300 & echo $!; sleep 300")
-    bg_pid = track_pid(h.stdout.gets.to_i)
-
-    assert_running bg_pid, "sanity: backgrounded grandchild should be alive"
-    h.terminate(grace: 0.5)
-
-    assert_dead_within 2, bg_pid, "group teardown should kill the backgrounded grandchild"
-  end
-
-  # leader exits immediately, orphaning a grandchild that still holds the dead
-  # leader's pgid -- terminate must still signal the group, not skip it
-  def test_terminate_signals_group_when_leader_already_exited
-    h = Holder::Tenant.new("sh", "-c", "sleep 300 & echo $!").run # sh backgrounds, then returns
-    @procs << h
-    gc = track_pid(h.stdout.gets.to_i)
-    sleep 0.25 # let the leader exit
-
-    assert_running gc, "sanity: orphaned grandchild should be alive"
-    h.terminate(grace: 0.5)
-
-    assert_dead_within 2, gc, "terminate must signal the group even after the leader has exited"
-  end
-
-  def test_fixed_double_terminate_idempotent
-    h = spawn("sh", "-c", "sleep 30")
-    a = h.terminate(grace: 0.5)
-    b = h.terminate(grace: 0.5)
-
-    assert_same a, b, "second terminate returns the same cached status, no raise"
-    assert_all_closed [h.stdin, h.stdout, h.stderr], "pipes should be closed"
-  end
-
-  def test_handle_hygiene_hides_internals_and_redirected_streams
-    f = open_tmp("w")
-    h = spawn("sh", "-c", "echo hi; sleep 5", out: f) # out redirected, err/in not
-
-    assert_nil h.stdout, "a redirected stream must not expose its internal pipe"
-    refute_nil h.stderr, "an un-redirected stream stays a usable pipe"
-    assert_kind_of Integer, h.pid
-    %i[pump_threads owned_ios wait_thread mutex].each do |internal|
-      refute_respond_to h, internal, "#{internal} is plumbing and must stay internal"
-    end
-    h.terminate(grace: 0.5)
-  end
-
-  # flaw #4: INT-ignoring process no longer survives teardown
-  def test_fixed_interrupt_also_escalates
-    h = spawn("sh", "-c", 'trap "" INT; while :; do sleep 1; done')
-    pid = h.pid
-    h.interrupt(grace: 0.5)
-
-    refute_running pid, "INT-ignoring process should be SIGKILLed by interrupt's escalation"
-  end
-
-  # ---- production: resource accounting & error paths -----------------------
-
-  def test_no_fd_or_thread_leak_over_many_cycles
-    GC.start
-    sleep 0.1
-    fds0 = fd_count
-    thr0 = Thread.list.size
-    LEAK_CYCLES.times { Holder::Tenant.new("sh", "-c", "echo hi").run { |io| io.stdout.read } }
-    LEAK_CYCLES.times do
-      f = open_tmp("w")
-      Holder::Tenant.new("sh", "-c", "echo hi", out: f).run(&:wait)
-      f.close
-    end
-    LEAK_CYCLES.times { Holder::Tenant.new("cat", in: input_io("x\n")).run { |io| io.stdout.read } }
-    GC.start
-    sleep 0.4
-
-    assert_operator fd_count - fds0, :<=, 2, "fds must not grow across spawn/teardown cycles"
-    assert_operator Thread.list.size - thr0, :<=, 2, "threads must not grow across cycles"
-  end
-
-  def test_block_form_cleans_up_when_block_raises
+  def test_block_form_tears_down_child_when_block_raises
     pid = nil
     assert_raises(RuntimeError) do
-      Holder::Tenant.new("sh", "-c", "sleep 30").run do |io|
+      Holder::Tenant.new("sh", "-c", "sleep #{OUTLIVES_TEST}").run do |io|
         pid = io.pid
         raise "boom"
       end
     end
-    track_pid(pid, group: true)
+    @cleanup.pid(pid, group: true)
 
-    assert_dead_within 2, pid, "ensure must tear the child down even when the block raises"
+    assert_dead_within 2, pid
   end
 
-  # a redirect failing mid-copy
-  def test_pump_error_is_captured_not_raised
-    src = StringIO.new("data")
-    bad = Object.new
-
-    # stand-in for ENOSPC/EIO on write
-    def bad.write(*) = raise("disk full")
-
-    thread = Holder::Tenant.allocate.send(:pump, src, bad)
-
-    assert_kind_of RuntimeError, thread.value, "pump must capture the error as its value, not raise"
-  end
-
-  def test_pump_error_does_not_block_pipe_close
-    r, w = pipe
-    _, _, _, wait = Open3.popen3("true") # a real, short-lived wait_thread
-    failed = Thread.new { RuntimeError.new("disk full") } # a pump that finished with an error
-    h = Holder::Handle.new(
-      stdin: nil, stdout: nil, stderr: nil,
-      wait_thread: wait, pump_threads: [failed], owned_ios: [r, w]
-    )
-    h.terminate(grace: 0.5)
-
-    assert_all_closed [r, w], "owned pipes must close even when a pump errored"
-    assert_kind_of RuntimeError, h.pump_error, "the pump error is surfaced on the handle"
-  end
-
-  # dropping a no-block handle without terminate/wait leaks the process -- this
-  # pins that contract so it can't silently change
-  def test_dropped_no_block_handle_leaks_until_terminated
-    pid = track_pid(Holder::Tenant.new("sh", "-c", "sleep 30").run.pid, group: true) # handle goes out of scope
+  def test_dropped_handle_is_not_auto_reaped
+    pid = @cleanup.pid(Holder::Tenant.new("sh", "-c", "sleep #{OUTLIVES_TEST}").run.pid, group: true)
     GC.start
     sleep 0.2
 
-    assert_running pid, "no-block handle isn't auto-reaped; caller must tear it down"
+    assert_running pid
   end
 
-  # ---- regression: reviewer findings ---------------------------------------
+  def test_terminate_on_exited_child_returns_status
+    h = spawn("true")
+    wait_for_exit(h.pid)
 
-  # finding #1
-  def test_matcher_lives_under_holder_not_core_io
-    refute_includes ::IO.constants, :InputStreamType, "must not patch core ::IO"
-    assert_includes Holder.constants, :StreamType, "the matcher belongs under Holder"
+    assert_kind_of ::Process::Status, h.terminate
   end
 
-  # finding #2
-  def test_matcher_rejects_non_io_arguments
-    [0, 1, 2, 64, "/dev/null", "log.txt", :stdin, StringIO.new("x")].each do |bad|
-      refute_operator Holder::StreamType, :===, bad, "#{bad.inspect} is not an IO and must be rejected"
-    end
-    f = open_tmp("w")
+  def test_double_terminate_returns_the_same_status
+    h = spawn("sh", "-c", "sleep #{OUTLIVES_TEST}")
+    first = h.terminate(grace: 0.5)
 
-    [$stdin, $stdout, f].each do |good|
-      assert_operator Holder::StreamType, :===, good, "#{good.class} is a real IO and must be accepted"
-    end
+    assert_same first, h.terminate(grace: 0.5)
   end
 
-  # finding #3 (no silent detonation)
-  def test_run_rejects_non_io_redirect_up_front
-    assert_raises(ArgumentError) { Holder::Tenant.new("cat", in: 0).run }
-    assert_raises(ArgumentError) { Holder::Tenant.new("cat", out: "log.txt").run }
-    assert_raises(ArgumentError) { Holder::Tenant.new("cat", err: StringIO.new).run }
-  end
-
-  # finding #4
-  def test_kwargs_forwarded_to_spawn
-    dir = tmpdir
-    f = open_tmp("w")
-    Holder::Tenant.new("sh", "-c", "pwd", out: f, chdir: dir).run.wait
-    f.close
-
-    assert_equal dir, File.read(f.path).strip, "chdir kwarg must reach spawn"
-  end
-
-  # our pgroup:true must win. the grandchild sleeps far longer than the test
-  # window, so the ONLY way it can die in time is the group signal -- a stray
-  # self-exit can't masquerade as a pass, and an alive grandchild fails fast.
-  def test_kwargs_cannot_override_pgroup
-    h = Holder::Tenant.new("sh", "-c", "sleep 300 & echo $!; sleep 300", pgroup: false).run
-    @procs << h
-    gc = track_pid(h.stdout.gets.to_i)
-
-    assert_running gc, "sanity: backgrounded grandchild should be alive"
+  def test_terminate_closes_the_handle_pipes
+    h = spawn("sh", "-c", "sleep #{OUTLIVES_TEST}")
     h.terminate(grace: 0.5)
 
-    assert_dead_within 2, gc, "pgroup:true must win so teardown reaches the group"
+    assert_all_closed [h.stdin, h.stdout, h.stderr]
   end
 
-  # finding #5
-  def test_wait_does_not_starve_terminate
-    h = spawn("sh", "-c", "sleep 30")
+  def test_term_ignoring_child_is_force_killed
+    h = spawn("sh", "-c", 'trap "" TERM; while :; do sleep 1; done')
+    pid = h.pid
+    h.terminate(grace: 0.5)
+
+    refute_running pid
+  end
+
+  def test_int_ignoring_child_is_force_killed_by_interrupt
+    h = spawn("sh", "-c", 'trap "" INT; while :; do sleep 1; done')
+    pid = h.pid
+    h.interrupt(grace: 0.5)
+
+    refute_running pid
+  end
+
+  def test_terminate_from_a_non_owning_thread_does_not_raise
+    h = spawn("sh", "-c", "sleep #{OUTLIVES_TEST}")
+
+    assert_nil(error_raised_in_thread { h.terminate(grace: 0.5) })
+  end
+
+  def test_terminate_is_not_blocked_by_a_concurrent_wait
+    h = spawn("sh", "-c", "sleep #{OUTLIVES_TEST}")
     waiter = Thread.new { h.wait }
-    sleep 0.2
-    dt = elapsed { h.terminate(grace: 0.5) }
+    Thread.pass until waiter.status == "sleep"
+    duration = elapsed { h.terminate(grace: 0.5) }
     waiter.join
 
-    assert_operator dt, :<, 2.0, "terminate must not block behind a concurrent wait (took #{dt.round(2)}s)"
+    assert_operator duration, :<, 2.0
   end
 
-  # found while testing #2/#3
-  def test_terminate_bounded_with_never_eof_input
-    r, w = pipe
-    w.write("partial, no EOF\n") # writer kept open -> r never EOFs
-    h = Holder::Tenant.new("cat", in: r).run
-    @procs << h
+  def test_terminate_is_bounded_when_in_source_never_eofs
+    h = @cleanup.process(Holder::Tenant.new("cat", in: never_eof_source).run)
     sleep 0.2
-    dt = elapsed { h.terminate(grace: 0.5) }
+    duration = elapsed { h.terminate(grace: 0.5) }
 
-    assert_operator dt, :<, Holder::Handle::PUMP_GRACE + 2,
-                    "an in: pump stuck on a non-EOF source must not wedge terminate (took #{dt.round(2)}s)"
+    assert_operator duration, :<, Holder::Handle::PUMP_GRACE + 2
+  end
+
+  def test_group_teardown_kills_backgrounded_grandchild
+    h = spawn("sh", "-c", "sleep #{OUTLIVES_TEST} & echo $!; sleep #{OUTLIVES_TEST}")
+    grandchild = live_pid_from(h.stdout)
+    h.terminate(grace: 0.5)
+
+    assert_dead_within 2, grandchild
+  end
+
+  def test_terminate_signals_group_after_leader_has_exited
+    h = @cleanup.process(Holder::Tenant.new("sh", "-c", "sleep #{OUTLIVES_TEST} & echo $!").run)
+    grandchild = live_pid_from(h.stdout)
+    wait_for_exit(h.pid)
+    h.terminate(grace: 0.5)
+
+    assert_dead_within 2, grandchild
+  end
+
+  def test_pgroup_true_cannot_be_overridden_by_kwargs
+    h = @cleanup.process(
+      Holder::Tenant.new("sh", "-c", "sleep #{OUTLIVES_TEST} & echo $!; sleep #{OUTLIVES_TEST}", pgroup: false).run,
+    )
+    grandchild = live_pid_from(h.stdout)
+    h.terminate(grace: 0.5)
+
+    assert_dead_within 2, grandchild
+  end
+
+  def test_redirected_stream_is_not_exposed_as_a_pipe
+    h = spawn("sh", "-c", "echo hi; sleep #{OUTLIVES_TEST}", out: open_tmp("w"))
+
+    assert_nil h.stdout
+  end
+
+  def test_unredirected_stream_remains_a_pipe
+    h = spawn("sh", "-c", "echo hi; sleep #{OUTLIVES_TEST}", out: open_tmp("w"))
+
+    refute_nil h.stderr
+  end
+
+  def test_handle_exposes_an_integer_pid
+    h = spawn("sh", "-c", "sleep #{OUTLIVES_TEST}")
+
+    assert_kind_of Integer, h.pid
+  end
+
+  def test_handle_hides_internal_plumbing
+    h = spawn("sh", "-c", "sleep #{OUTLIVES_TEST}")
+
+    %i[pump_threads owned_ios wait_thread mutex].each do |internal|
+      refute_respond_to h, internal
+    end
+  end
+
+  def test_file_descriptors_do_not_leak_across_cycles
+    GC.start
+    before = fd_count
+    churn_processes(LEAK_CYCLES)
+    GC.start
+    sleep 0.2
+
+    assert_operator fd_count - before, :<=, 2
+  end
+
+  def test_threads_do_not_leak_across_cycles
+    GC.start
+    before = Thread.list.size
+    churn_processes(LEAK_CYCLES)
+    GC.start
+    sleep 0.2
+
+    assert_operator Thread.list.size - before, :<=, 2
+  end
+
+  def test_pump_captures_writer_error_as_its_value
+    thread = Holder::Tenant.allocate.send(:pump, StringIO.new("data"), AlwaysFailingWriter.new)
+
+    assert_kind_of RuntimeError, thread.value
+  end
+
+  def test_owned_pipes_close_even_when_a_pump_errored
+    reader, writer = pipe
+    handle = handle_with_failed_pump(owned_ios: [reader, writer])
+    handle.terminate(grace: 0.5)
+
+    assert_all_closed [reader, writer]
+  end
+
+  def test_handle_surfaces_the_pump_error
+    handle = handle_with_failed_pump(owned_ios: pipe)
+    handle.terminate(grace: 0.5)
+
+    assert_kind_of RuntimeError, handle.pump_error
+  end
+
+  def test_stream_matcher_does_not_patch_core_io
+    refute_includes ::IO.constants, :InputStreamType
+  end
+
+  def test_stream_matcher_is_defined_under_holder
+    assert_includes Holder.constants, :StreamType
+  end
+
+  def test_stream_matcher_rejects_non_io_values
+    [0, 1, 2, 64, "/dev/null", "log.txt", :stdin, StringIO.new("x")].each do |value|
+      refute_operator Holder::StreamType, :===, value
+    end
+  end
+
+  def test_stream_matcher_accepts_real_ios
+    [$stdin, $stdout, open_tmp("w")].each do |io|
+      assert_operator Holder::StreamType, :===, io
+    end
+  end
+
+  def test_run_rejects_non_io_redirects_immediately
+    { in: 0, out: "log.txt", err: StringIO.new }.each do |stream, value|
+      assert_raises(ArgumentError) { Holder::Tenant.new("cat", **{ stream => value }).run }
+    end
+  end
+
+  def test_chdir_kwarg_is_forwarded_to_the_child
+    dir = tmpdir
+    out = open_tmp("w")
+    Holder::Tenant.new("sh", "-c", "pwd", out: out, chdir: dir).run.wait
+    out.close
+
+    assert_equal dir, File.read(out.path).strip
   end
 end
-

@@ -95,7 +95,10 @@ module Holder
     # captured error is still surfaced as pump_error.
     def reap_pumps
       @pump_threads.filter_map do |t|
-        (t.kill; t.join) unless t.join(PUMP_GRACE)
+        unless t.join(PUMP_GRACE)
+          (t.kill
+           t.join)
+        end
         t.value
       end.first
     end

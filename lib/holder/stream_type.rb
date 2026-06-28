@@ -1,10 +1,12 @@
 module Holder
+  ##
+  # Type matcher for the +in:+/+out:+/+err:+ redirect arguments. Defined under
+  # +Holder+ -- NOT core <tt>::IO</tt> -- and matches only real IO instances
+  # (<tt>$stdin</tt>/<tt>$stdout</tt>/<tt>$stderr</tt>, File, pipe ends). Integer
+  # fds, path strings, StringIO, Tempfile and other duck types are rejected at
+  # validation, so a stray <tt>run(in: 0)</tt> raises up front instead of slipping
+  # through and detonating later inside a pump.
   module StreamType
-    # Type matcher for the in:/out:/err: redirect arguments. Defined under Pb3 --
-    # NOT core ::IO -- and matches only real IO instances ($stdin/$stdout/$stderr,
-    # File, pipe ends). Integer fds, path strings, StringIO, Tempfile and other
-    # duck types are rejected here at validation, so a stray `run(in: 0)` raises up
-    # front instead of slipping through and detonating later inside a pump.
     def self.===(other) = other.is_a?(::IO)
   end
 end

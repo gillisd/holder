@@ -1,33 +1,35 @@
-# frozen_string_literal: true
-
-require 'open3'
+require "open3"
 
 module Holder
+  ##
+  # Builds and launches a child process, returning a Handle that owns its teardown.
+  #
+  # +in:+, +out:+, and +err:+ each accept an IO (or +nil+) to redirect that stream
+  # to; any other keyword (+chdir+, +umask+, ...) is forwarded to the spawn. The
+  # child always runs in its own process group so the whole group can be torn down
+  # together -- this is not overridable.
   class Tenant
     attr_reader :handle, :pgroup, :kwargs
     private attr_reader :args
     private attr_writer :handle
 
-    def initialize(*args, in: nil, out: nil, err: nil, pgroup: true, **kwargs)
+    def initialize(*args, in: nil, out: nil, err: nil, **kwargs)
       @args = args
       @io_defs = { in:, out:, err: }
-      @pgroup = pgroup
+      @pgroup = true
       @kwargs = kwargs
     end
 
     def run
-      # Validate and read the three streams in one shot. The pattern match is
-      # also how we read in: -- it's a keyword, so it can't be named as a local;
-      # an alternative pattern with an outer binding both checks "IO or nil" and
-      # binds the value.
-      case { in: nil, out: nil, err: nil }.merge(@io_defs)
-      in { in: (StreamType | nil) => u_sin,
-        out: (StreamType | nil) => u_sout,
-        err: (StreamType | nil) => u_serr }
-        # ok
-      else
+      # Validate the three streams up front. The one-line pattern match checks each
+      # is an IO or nil (in: is a keyword, so it can't be named as a local); we then
+      # read the values out by key. A bad stream raises ArgumentError here rather
+      # than slipping through and detonating later inside a pump.
+      unless @io_defs in { in: StreamType | nil, out: StreamType | nil, err: StreamType | nil }
         raise ArgumentError, "in:, out:, and err: must each be an IO object or nil"
       end
+
+      u_sin, u_sout, u_serr = @io_defs.values_at(:in, :out, :err)
 
       # Open3 ALWAYS pipes stdin and stdout, so in:/out: are always pumped; err is
       # the only stream that can go direct, and only via popen2. So the entire
@@ -82,7 +84,7 @@ module Holder
         stderr: u_serr ? nil : serr_pipe,
         wait_thread: piped.fetch(:wait),
         pump_threads: pumps,
-        owned_ios: [sin_pipe, sout_pipe, serr_pipe].compact
+        owned_ios: [sin_pipe, sout_pipe, serr_pipe].compact,
       )
     end
 
