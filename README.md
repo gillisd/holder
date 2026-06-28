@@ -47,15 +47,14 @@ while a test runs, say:
 
 ```ruby
 require "holder"
-require "net/http"
-require "uri"
 
-# Boot a server just for the duration of the block. When the block returns — or
-# raises — Holder shuts it down along with its whole process group, freeing the
-# port; you never leak a server process.
-page = Holder::Tenant.new("python3", "-m", "http.server", "8000").run do |server|
-  sleep 0.5                                    # let it bind the port
-  Net::HTTP.get(URI("http://localhost:8000/index.html"))
+# Bring nginx up only while your integration suite runs. nginx forks a master
+# plus worker processes; signalling just the master would orphan the workers, so
+# Holder tears down the whole process group. On block exit — or if the block
+# raises — everything is reaped and the port is freed.
+Holder::Tenant.new("nginx", "-g", "daemon off;", "-c", "/etc/nginx/test.conf").run do |nginx|
+  sleep 0.5                                    # wait for nginx to bind the port
+  MyApp::IntegrationSuite.run(base_url: "http://localhost:8080")
 end
 ```
 
