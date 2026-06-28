@@ -41,23 +41,38 @@ A `Holder::Tenant` describes a command to run; `#run` launches it and returns a
 ### Block form — scoped, self-cleaning
 
 The handle is yielded to the block and torn down automatically when the block
-exits, **even if it raises**. `#run` returns the block's value.
+exits, **even if it raises**. `#run` returns the block's value. This is ideal for
+a process whose lifetime should be tied to a scope — a server you need up only
+while a test runs, say:
 
 ```ruby
 require "holder"
+require "net/http"
+require "uri"
 
-output = Holder::Tenant.new("echo", "hello").run { |handle| handle.stdout.read }
-# => "hello\n"
+# Boot a server just for the duration of the block. When the block returns — or
+# raises — Holder shuts it down along with its whole process group, freeing the
+# port; you never leak a server process.
+page = Holder::Tenant.new("python3", "-m", "http.server", "8000").run do |server|
+  sleep 0.5                                    # let it bind the port
+  Net::HTTP.get(URI("http://localhost:8000/index.html"))
+end
 ```
 
 ### No-block form — you own teardown
 
 `#run` returns the handle; call `#wait` to block until it exits on its own, or
-`#terminate`/`#interrupt` to stop it.
+`#terminate`/`#interrupt` to stop it whenever you like. Good for a long-running
+process you read from until you've seen enough:
 
 ```ruby
-handle = Holder::Tenant.new("sleep", "300").run
-# ... do other work ...
+# Follow a growing log file in the background, then stop it when you're done.
+handle = Holder::Tenant.new("tail", "-F", "/var/log/app.log").run
+
+handle.stdout.each_line do |line|
+  break if line.include?("migration complete")
+end
+
 handle.terminate   # SIGTERM the group, escalate to SIGKILL after the grace period, reap
 ```
 
@@ -92,11 +107,14 @@ Holder::Tenant.new("cat", err: StringIO.new) # => ArgumentError
 ### Group teardown
 
 The child always runs in its own process group (this is not overridable), so
-teardown reaches backgrounded grandchildren too:
+teardown reaches backgrounded grandchildren too. Signalling only the wrapper
+process would orphan anything it spawned; Holder signals the whole group:
 
 ```ruby
-Holder::Tenant.new("sh", "-c", "sleep 300 & sleep 300").run do |handle|
-  # both the shell and the backgrounded `sleep` are killed when the block exits
+# A dev script that boots a server and a file watcher alongside it. Both — and
+# the shell that launched them — are reaped when the block exits.
+Holder::Tenant.new("sh", "-c", "npm run watch & npm start").run do |handle|
+  # ... run against the server ...
 end
 ```
 
@@ -106,7 +124,7 @@ Any keyword other than `in:`/`out:`/`err:` is forwarded to the underlying spawn
 (`chdir`, `umask`, `unsetenv_others`, ...):
 
 ```ruby
-Holder::Tenant.new("pwd", out: $stdout, chdir: "/tmp").run.wait
+Holder::Tenant.new("git", "log", "--oneline", "-5", out: $stdout, chdir: "/path/to/repo").run.wait
 ```
 
 ## API
