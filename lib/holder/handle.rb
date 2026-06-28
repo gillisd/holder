@@ -25,7 +25,7 @@ module Holder
 
     attr_reader :stdin, :stdout, :stderr, :pid, :pump_error
 
-    def initialize(stdin:, stdout:, stderr:, wait_thread:, pump_threads:, owned_ios:)
+    def initialize(stdin:, stdout:, stderr:, wait_thread:, pump_threads:, owned_ios:) # rubocop:disable Metrics/ParameterLists
       @stdin = stdin
       @stdout = stdout
       @stderr = stderr

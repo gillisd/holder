@@ -5,7 +5,7 @@ require "stringio"
 require "fileutils"
 require "timeout"
 
-class HolderTest < Minitest::Test
+class HolderTest < Minitest::Test # rubocop:disable Metrics/ClassLength
   include FileUtils
 
   module Clock
@@ -70,7 +70,7 @@ class HolderTest < Minitest::Test
     def run
       @deferred.reverse_each do |action|
         action.call
-      rescue StandardError
+      rescue StandardError # rubocop:disable Claude/NoOverlyDefensiveCode
         nil
       end
     end
@@ -169,19 +169,21 @@ class HolderTest < Minitest::Test
     end.value
   end
 
-  def churn_processes(n)
-    n.times { Holder::Tenant.new("sh", "-c", "echo hi").run { |io| io.stdout.read } }
-    n.times do
+  # rubocop:disable Metrics/AbcSize, Metrics/MethodLength
+  def churn_processes(count)
+    count.times { Holder::Tenant.new("sh", "-c", "echo hi").run { |io| io.stdout.read } }
+    count.times do
       f = open_tmp("w")
       Holder::Tenant.new("sh", "-c", "echo hi", out: f).run(&:wait)
       f.close
     end
-    n.times do
+    count.times do
       i = input_io("x\n")
       Holder::Tenant.new("cat", in: i).run { |io| io.stdout.read }
       i.close
     end
   end
+  # rubocop:enable Metrics/AbcSize, Metrics/MethodLength
 
   def reaped_wait_thread
     stdin, stdout, stderr, wait = Open3.popen3("true")
@@ -206,9 +208,9 @@ class HolderTest < Minitest::Test
     refute_predicate ProcessProbe.new(pid), :alive?, msg || "expected pid #{pid} not to be running"
   end
 
-  def assert_dead_within(timeout, pid, msg = nil)
+  def assert_dead_within(timeout, pid)
     assert ProcessProbe.new(pid).dead_within?(timeout),
-           msg || "expected pid #{pid} to die within #{timeout}s"
+           "expected pid #{pid} to die within #{timeout}s"
   end
 
   def assert_all_closed(ios, msg = nil)

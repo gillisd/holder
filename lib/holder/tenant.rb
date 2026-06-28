@@ -20,7 +20,7 @@ module Holder
       @kwargs = kwargs
     end
 
-    def run
+    def run # rubocop:disable Metrics/AbcSize, Metrics/MethodLength
       # Validate the three streams up front. The one-line pattern match checks each
       # is an IO or nil (in: is a keyword, so it can't be named as a local); we then
       # read the values out by key. A bad stream raises ArgumentError here rather

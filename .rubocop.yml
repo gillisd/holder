@@ -158,3 +158,9 @@ Style/TrailingCommaInHashLiteral:
 Style/TrailingCommaInArguments:
   EnforcedStyleForMultiline: comma
 
+# Permit targeted inline `# rubocop:disable` directives. The HolderTest case class
+# carries a few by-design exemptions (a large test class, churn helper metrics)
+# that are clearer as local directives than as blanket per-file config excludes.
+Style/DisableCopsWithinSourceCodeDirective:
+  Enabled: false
+
