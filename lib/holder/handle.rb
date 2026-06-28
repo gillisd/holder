@@ -41,7 +41,7 @@ module Holder
 
     def interrupt(grace: GRACE) = teardown("INT", grace)
 
-    # Wait for the process to exit on its own, then finalize.
+    # Wait for the process to exit on its own, then reap its group and finalize.
     def wait
       # Block on the waiter OUTSIDE the mutex: Thread#value is itself
       # thread-safe, and holding the mutex across the block would wedge a
@@ -49,7 +49,15 @@ module Holder
       # the process exited on its own. finalize runs under the mutex and is
       # idempotent, so a terminate signal that finalizes first is harmless.
       status = @wait_thread.value
-      @mutex.synchronize { finalize }
+      @mutex.synchronize do
+        # The leader exited on its own, but a grandchild it backgrounded can
+        # outlive it in the same group -- so sweep the group before finalizing,
+        # or wait would leave it orphaned (no child left behind). The group is
+        # empty in the common case, where signal_group rescues ESRCH. Killing
+        # the group first also lets any out:/in: pump drain instead of stalling.
+        signal_group("KILL")
+        finalize
+      end
       status
     end
 

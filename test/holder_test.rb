@@ -294,6 +294,14 @@ class HolderTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     assert_dead_within 2, grandchild
   end
 
+  def test_wait_reaps_the_group_after_the_leader_exits
+    h = @cleanup.process(Holder::Tenant.new("sh", "-c", "sleep #{OUTLIVES_TEST} & echo $!").run)
+    grandchild = live_pid_from(h.stdout)
+    h.wait
+
+    assert_dead_within 2, grandchild
+  end
+
   def test_pgroup_true_cannot_be_overridden_by_kwargs
     h = @cleanup.process(
       Holder::Tenant.new("sh", "-c", "sleep #{OUTLIVES_TEST} & echo $!; sleep #{OUTLIVES_TEST}", pgroup: false).run,
