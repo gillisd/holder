@@ -1,25 +1,167 @@
 # Holder
 
-A process supervisor that ensures no child is left behind
+A process supervisor that ensures no child is left behind.
+
+Spawning a child process in Ruby is easy; tearing it down cleanly is not. A child
+that ignores `SIGTERM`, a shell that backgrounds grandchildren into the same
+process group, a redirect pump blocked on an IO that never reaches EOF — any of
+these can leave you with orphaned processes, leaked file descriptors, or dangling
+threads.
+
+Holder wraps `Open3` and gives you a single `Handle` that owns the whole lifecycle:
+it launches the child in its own process group, lets you talk to its streams, and
+on teardown signals the **entire group**, escalates to `SIGKILL` if the grace
+period lapses, reaps the child, joins the redirect pumps, and closes every pipe it
+owns. Teardown is idempotent, thread-safe, and callable from any thread.
+
+## Requirements
+
+- Ruby >= 4.0.1
+- A Unix-like OS (teardown relies on POSIX process groups and signals)
 
 ## Installation
 
-Install the gem and add to the application's Gemfile by executing:
+Add the gem to your application's Gemfile:
 
-    $ bundle add holder
+```
+$ bundle add holder
+```
 
-If bundler is not being used to manage dependencies, install the gem by executing:
+Or install it directly:
 
-    $ gem install holder
+```
+$ gem install holder
+```
 
 ## Usage
 
-TODO: Write usage instructions here.
+A `Holder::Tenant` describes a command to run; `#run` launches it and returns a
+`Holder::Handle`. `#run` has two forms.
+
+### Block form — scoped, self-cleaning
+
+The handle is yielded to the block and torn down automatically when the block
+exits, **even if it raises**. `#run` returns the block's value.
+
+```ruby
+require "holder"
+
+output = Holder::Tenant.new("echo", "hello").run { |handle| handle.stdout.read }
+# => "hello\n"
+```
+
+### No-block form — you own teardown
+
+`#run` returns the handle; call `#wait` to block until it exits on its own, or
+`#terminate`/`#interrupt` to stop it.
+
+```ruby
+handle = Holder::Tenant.new("sleep", "300").run
+# ... do other work ...
+handle.terminate   # SIGTERM the group, escalate to SIGKILL after the grace period, reap
+```
+
+### Redirecting streams
+
+Pass an **IO object** (not a path or fd number) as `in:`, `out:`, or `err:`:
+
+```ruby
+# Feed an IO as the child's stdin (drained to EOF, then closed for you)
+sorted = File.open("names.txt") do |input|
+  Holder::Tenant.new("sort", in: input).run { |handle| handle.stdout.read }
+end
+
+# Send the child's stdout/stderr to your own IOs
+File.open("build.log", "w") do |log|
+  Holder::Tenant.new("make", "build", out: log, err: log).run.wait
+end
+```
+
+A stream you redirect is talked to through *your* IO, so the matching accessor on
+the handle is `nil`; a stream you leave alone is exposed as a pipe
+(`handle.stdin` / `handle.stdout` / `handle.stderr`).
+
+Anything other than an IO or `nil` is rejected up front:
+
+```ruby
+Holder::Tenant.new("cat", in: 0)            # => ArgumentError
+Holder::Tenant.new("cat", out: "log.txt")   # => ArgumentError
+Holder::Tenant.new("cat", err: StringIO.new) # => ArgumentError
+```
+
+### Group teardown
+
+The child always runs in its own process group (this is not overridable), so
+teardown reaches backgrounded grandchildren too:
+
+```ruby
+Holder::Tenant.new("sh", "-c", "sleep 300 & sleep 300").run do |handle|
+  # both the shell and the backgrounded `sleep` are killed when the block exits
+end
+```
+
+### Forwarding spawn options
+
+Any keyword other than `in:`/`out:`/`err:` is forwarded to the underlying spawn
+(`chdir`, `umask`, `unsetenv_others`, ...):
+
+```ruby
+Holder::Tenant.new("pwd", out: $stdout, chdir: "/tmp").run.wait
+```
+
+## API
+
+### `Holder::Tenant`
+
+- `Tenant.new(*command, in: nil, out: nil, err: nil, **spawn_opts)` — describe a
+  command. `in:`/`out:`/`err:` take an IO or `nil`; `spawn_opts` are forwarded to
+  the spawn.
+- `#run` — launch, return a `Handle` (caller owns teardown).
+- `#run { |handle| ... }` — launch, yield the handle, tear it down on block exit,
+  and return the block's value.
+
+### `Holder::Handle`
+
+| Member | Description |
+| --- | --- |
+| `#pid` | the child's process id |
+| `#stdin` / `#stdout` / `#stderr` | the pipe for a stream you did **not** redirect, otherwise `nil` |
+| `#wait` | block until the child exits on its own, finalize, and return its `Process::Status` |
+| `#terminate(grace: 5)` | `SIGTERM` the group, wait `grace` seconds, then `SIGKILL`; reap and close pipes. Returns the `Process::Status` |
+| `#interrupt(grace: 5)` | same as `#terminate` but the first signal is `SIGINT` |
+| `#pump_error` | the unexpected error a redirect pump hit (e.g. `ENOSPC`), or `nil`, available after teardown |
+
+`#terminate`, `#interrupt`, and `#wait` are idempotent, thread-safe, and may be
+called from any thread; calling `#terminate` twice returns the same status.
+
+### `Holder::Error`
+
+Base error class for the gem.
+
+## How teardown works
+
+1. Signal the whole process group with the first signal (`TERM` or `INT`) — always,
+   even if the leader has already exited, since orphaned grandchildren keep the
+   group's pgid alive.
+2. Wait up to `grace` seconds for the group to die; if it doesn't, send `SIGKILL`
+   and wait again.
+3. Reap the child.
+4. Join the redirect pumps, giving a healthy one `Handle::PUMP_GRACE` seconds to
+   finish draining; a pump still blocked on a misbehaving IO is interrupted so it
+   can never wedge teardown.
+5. Close every pipe the handle owns. Caller-provided `in:`/`out:`/`err:` IOs are
+   **not** closed — you opened them, so you close them.
 
 ## Development
 
-After checking out the repo, run `bin/setup` to install dependencies. Then, run `rake test` to run the tests.
+After checking out the repo, run `bundle install` to install dependencies. Then:
+
+- `rake test` — run the test suite
+- `rake rubocop` — run the linter
+- `rake` — run both (the default task)
+- `rake zeitwerk:validate` — verify the gem follows Zeitwerk naming conventions
 
 ## License
 
-The gem is available as open source under the terms of the [MIT License](https://opensource.org/licenses/MIT).
+The gem is available as open source under the terms of the
+[MIT License](https://opensource.org/licenses/MIT).
