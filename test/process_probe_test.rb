@@ -1,6 +1,8 @@
 require "test_helper"
 
 class ProcessProbeTest < Minitest::Test
+  parallelize_me!
+
   def setup
     @pids = []
   end
