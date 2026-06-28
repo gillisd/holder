@@ -5,6 +5,7 @@ gemspec
 gem "gempilot", require: false
 gem "irb"
 gem "minitest"
+gem "minitest-mock"
 gem "minitest-reporters"
 gem "rake"
 gem "rubocop"
