@@ -23,6 +23,9 @@ module Holder
     # before interrupting it (see reap_pumps)
     PUMP_GRACE = 1
 
+    # interval between process-group liveness polls while awaiting the grace window
+    POLL = 0.02
+
     attr_reader :stdin, :stdout, :stderr, :pid, :pump_error
 
     def initialize(stdin:, stdout:, stderr:, wait_thread:, pump_threads:, owned_ios:) # rubocop:disable Metrics/ParameterLists
@@ -51,13 +54,14 @@ module Holder
       status = @wait_thread.value
       @mutex.synchronize do
         # The leader exited on its own, but a grandchild it backgrounded can
-        # outlive it in the same group -- so sweep the group before finalizing,
-        # or wait would leave it orphaned (no child left behind). Unlike
-        # teardown, the leader is already reaped here (Thread#value waitpid'd
-        # it), so in the empty-group case we rely on signal_group rescuing ESRCH
-        # rather than on the pgid staying reserved. Killing the group first also
-        # lets any out:/in: pump drain instead of stalling.
-        signal_group("KILL")
+        # outlive it in the same group -- so reap the group before finalizing, or
+        # wait would leave it orphaned (no child left behind). wait is passive
+        # (it sent no first signal), so leftovers are killed outright rather than
+        # given grace. The KILL is guarded on group membership: only fire while
+        # the group still has members, so its pgid is reserved and the signal
+        # can't hit a recycled pid. Killing first also lets an out:/in: pump
+        # drain instead of stalling on a pipe the grandchild held open.
+        signal_group("KILL") if group_alive?
         finalize
       end
       status
@@ -69,17 +73,16 @@ module Holder
       @mutex.synchronize do
         # Always signal the group, even if the leader has already exited: an
         # orphaned grandchild keeps the leader's pgid, so the group outlives
-        # the leader and still needs the signal. The pgid stays reserved while
-        # the group has members, so this can't hit a recycled pid; and
-        # signal_group rescues ESRCH if the group is genuinely empty.
+        # the leader and still needs the signal. signal_group rescues ESRCH if
+        # the group is genuinely empty.
         signal_group(signal)
-        # Give the leader up to GRACE to go, then force the group with KILL --
-        # unconditionally. Even when the leader exited promptly (join returned
-        # early), a grandchild that ignored the first signal is still in the
-        # group and must be reaped; KILL on an already-empty group is a harmless
-        # ESRCH. join again afterward so the leader is reaped before we finalize.
-        @wait_thread.join(grace)
-        signal_group("KILL")
+        # Grace is measured against the whole GROUP, not just the leader: poll
+        # membership so a grandchild the leader backgrounded gets the same grace
+        # to shut down cleanly. Then KILL whatever is left -- but only while the
+        # group still has members, so its pgid is reserved and the signal can't
+        # land on a recycled pid.
+        await_group_exit(grace)
+        signal_group("KILL") if group_alive?
         @wait_thread.join
         finalize
         @wait_thread.value
@@ -91,6 +94,21 @@ module Holder
     rescue Errno::ESRCH
       # the group is empty (leader already reaped and no surviving members);
       # nothing to signal
+    end
+
+    # Block until the process group is empty or +grace+ seconds elapse.
+    def await_group_exit(grace)
+      deadline = Process.clock_gettime(Process::CLOCK_MONOTONIC) + grace
+      sleep POLL while group_alive? && Process.clock_gettime(Process::CLOCK_MONOTONIC) < deadline
+    end
+
+    # True while any process remains in the group. Signal 0 probes the group
+    # without delivering anything; ESRCH means it is empty.
+    def group_alive?
+      Process.kill(0, -@pid)
+      true
+    rescue Errno::ESRCH
+      false
     end
 
     def finalize

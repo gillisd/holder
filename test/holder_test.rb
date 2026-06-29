@@ -312,11 +312,28 @@ class HolderTest < Minitest::Test # rubocop:disable Metrics/ClassLength
   end
 
   def test_int_ignoring_grandchild_is_force_killed_after_leader_exits
-    h = @cleanup.process(Holder::Tenant.new("sh", "-c", "trap '' INT; sleep #{OUTLIVES_TEST} & echo $!").run)
+    # a non-interactive shell already sets INT to SIG_IGN for `&` jobs, so the
+    # backgrounded sleep ignores the interrupt; teardown must escalate to KILL
+    h = @cleanup.process(Holder::Tenant.new("sh", "-c", "sleep #{OUTLIVES_TEST} & echo $!").run)
     grandchild = live_pid_from(h.stdout)
     wait_for_exit(h.pid)
     h.interrupt(grace: 0.5)
 
+    assert_dead_within 2, grandchild
+  end
+
+  def test_terminate_grants_grace_to_a_cooperative_backgrounded_grandchild
+    marker = tmpfile
+    # The grandchild traps TERM to shut down cleanly (write the marker), then
+    # prints its pid only AFTER the trap is installed -- so reading the pid means
+    # terminate can't race ahead of the trap.
+    body = %(trap "sleep 0.3; echo done > #{marker}; exit 0" TERM; echo $$; sleep #{OUTLIVES_TEST})
+    h = @cleanup.process(Holder::Tenant.new("sh", "-c", %(sh -c '#{body}' &)).run)
+    grandchild = live_pid_from(h.stdout)
+    wait_for_exit(h.pid)
+    h.terminate(grace: 1)
+
+    assert_path_exists marker
     assert_dead_within 2, grandchild
   end
 
