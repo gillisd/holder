@@ -52,9 +52,11 @@ module Holder
       @mutex.synchronize do
         # The leader exited on its own, but a grandchild it backgrounded can
         # outlive it in the same group -- so sweep the group before finalizing,
-        # or wait would leave it orphaned (no child left behind). The group is
-        # empty in the common case, where signal_group rescues ESRCH. Killing
-        # the group first also lets any out:/in: pump drain instead of stalling.
+        # or wait would leave it orphaned (no child left behind). Unlike
+        # teardown, the leader is already reaped here (Thread#value waitpid'd
+        # it), so in the empty-group case we rely on signal_group rescuing ESRCH
+        # rather than on the pgid staying reserved. Killing the group first also
+        # lets any out:/in: pump drain instead of stalling.
         signal_group("KILL")
         finalize
       end
@@ -71,10 +73,14 @@ module Holder
         # the group has members, so this can't hit a recycled pid; and
         # signal_group rescues ESRCH if the group is genuinely empty.
         signal_group(signal)
-        unless @wait_thread.join(grace)
-          signal_group("KILL")
-          @wait_thread.join
-        end
+        # Give the leader up to GRACE to go, then force the group with KILL --
+        # unconditionally. Even when the leader exited promptly (join returned
+        # early), a grandchild that ignored the first signal is still in the
+        # group and must be reaped; KILL on an already-empty group is a harmless
+        # ESRCH. join again afterward so the leader is reaped before we finalize.
+        @wait_thread.join(grace)
+        signal_group("KILL")
+        @wait_thread.join
         finalize
         @wait_thread.value
       end
