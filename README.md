@@ -95,12 +95,13 @@ A stream you redirect is talked to through *your* IO, so the matching accessor o
 the handle is `nil`; a stream you leave alone is exposed as a pipe
 (`handle.stdin` / `handle.stdout` / `handle.stderr`).
 
-Anything other than an IO or `nil` is rejected up front:
+Anything other than an IO or `nil` is rejected by `#run`, before anything is
+spawned:
 
 ```ruby
-Holder::Tenant.new("cat", in: 0)            # => ArgumentError
-Holder::Tenant.new("cat", out: "log.txt")   # => ArgumentError
-Holder::Tenant.new("cat", err: StringIO.new) # => ArgumentError
+Holder::Tenant.new("cat", in: 0).run             # => ArgumentError
+Holder::Tenant.new("cat", out: "log.txt").run    # => ArgumentError
+Holder::Tenant.new("cat", err: StringIO.new).run # => ArgumentError
 ```
 
 ### Group teardown
@@ -143,13 +144,16 @@ Holder::Tenant.new("git", "log", "--oneline", "-5", out: $stdout, chdir: "/path/
 | --- | --- |
 | `#pid` | the child's process id |
 | `#stdin` / `#stdout` / `#stderr` | the pipe for a stream you did **not** redirect, otherwise `nil` |
-| `#wait` | block until the child exits on its own, finalize, and return its `Process::Status` |
+| `#wait` | block until the child exits on its own, reap group leftovers, deliver a redirected `out:` to the last byte, and return its `Process::Status` |
 | `#terminate(grace: 5)` | `SIGTERM` the group, wait `grace` seconds, then `SIGKILL`; reap and close pipes. Returns the `Process::Status` |
 | `#interrupt(grace: 5)` | same as `#terminate` but the first signal is `SIGINT` |
-| `#pump_error` | the unexpected error a redirect pump hit (e.g. `ENOSPC`), or `nil`, available after teardown |
+| `#pump_error` | the unexpected error a redirect pump hit (e.g. `ENOSPC`), or `nil`, available after teardown; when both pumps fail, the output-losing (drain) error wins |
 
 `#terminate`, `#interrupt`, and `#wait` are idempotent, thread-safe, and may be
 called from any thread; calling `#terminate` twice returns the same status.
+Concurrent teardowns share one escalation clock — the earliest deadline any
+caller asked for wins, so a `terminate(grace: 0)` is never stuck behind another
+caller's longer grace.
 
 ### `Holder::Error`
 
@@ -168,6 +172,12 @@ Base error class for the gem.
    can never wedge teardown.
 5. Close every pipe the handle owns. Caller-provided `in:`/`out:`/`err:` IOs are
    **not** closed — you opened them, so you close them.
+
+`#wait` differs in two ways: it sends no first signal (group leftovers found
+after the leader's own exit are killed outright), and it never deadline-kills
+the `out:` drain — a child that exited on its own gets its redirected output
+delivered in full, however slow the sink. Bound that delivery by calling
+`#terminate` instead.
 
 ## Development
 
