@@ -1,5 +1,6 @@
 require "test_helper"
 require "English"
+require "io/wait"
 require "open3"
 require "stringio"
 require "fileutils"
@@ -72,6 +73,24 @@ class HolderTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     reader
   end
 
+  # Stuff a pipe's write end until it would block, so the next write into it --
+  # like a pump delivering child output -- stalls until the reader drains it.
+  def fill_pipe(writer)
+    chunk = "x" * 4096
+    loop { break unless writer.write_nonblock(chunk, exception: false).is_a?(Integer) }
+  end
+
+  def drain_zero_bytes(reader, wanted, deadline:)
+    zeros = 0
+    while zeros < wanted && Clock.monotonic < deadline
+      next unless reader.wait_readable(0.05)
+
+      data = reader.read_nonblock(65_536, exception: false)
+      zeros += data.bytes.count(0) if data.is_a?(String)
+    end
+    zeros
+  end
+
   def fd_count
     # /dev/fd lists the current process's open descriptors on both Linux (a
     # symlink to /proc/self/fd) and macOS (a devfs), so it counts FDs portably.
@@ -133,6 +152,15 @@ class HolderTest < Minitest::Test # rubocop:disable Metrics/ClassLength
       wait_thread: reaped_wait_thread,
       pump_threads: [Thread.new { RuntimeError.new("disk full") }],
       owned_ios: owned_ios
+    )
+  end
+
+  def handle_with_pumps(pump_threads:, drain_pump: nil)
+    Holder::Handle.new(
+      stdin: nil, stdout: nil, stderr: nil,
+      wait_thread: reaped_wait_thread,
+      pump_threads:, drain_pump:,
+      owned_ios: []
     )
   end
 
@@ -237,6 +265,23 @@ class HolderTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     assert_kind_of ::Process::Status, h.terminate
   end
 
+  # The first-signal tests spawn sleep directly -- no shell. A shell in front
+  # can catch a group INT during its own fork window and drop it on the floor,
+  # which is a shell quirk, not the teardown behavior under test.
+  def test_terminate_delivers_the_first_signal_when_the_child_cooperates
+    h = spawn("sleep", OUTLIVES_TEST.to_s)
+    status = h.terminate(grace: 5)
+
+    assert_equal Signal.list["TERM"], status.termsig
+  end
+
+  def test_interrupt_delivers_the_first_signal_when_the_child_cooperates
+    h = spawn("sleep", OUTLIVES_TEST.to_s)
+    status = h.interrupt(grace: 5)
+
+    assert_equal Signal.list["INT"], status.termsig
+  end
+
   def test_double_terminate_returns_the_same_status
     h = spawn("sh", "-c", "sleep #{OUTLIVES_TEST}")
     first = h.terminate(grace: 0.5)
@@ -283,6 +328,19 @@ class HolderTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     assert_operator duration, :<, 2.0
   end
 
+  def test_concurrent_terminate_with_a_shorter_grace_is_not_wedged
+    # The child speaks only after ignoring TERM, so the first terminate cannot
+    # race the trap and is guaranteed to sit out its grace window.
+    h = spawn("sh", "-c", 'trap "" TERM; echo ready; while :; do sleep 1; done')
+    h.stdout.gets
+    patient = Thread.new { elapsed { h.terminate(grace: 2) } }
+    sleep 0.3
+    impatient = elapsed { h.terminate(grace: 0.2) }
+
+    assert_operator impatient, :<, 1.0
+    assert_operator patient.value, :<, 1.8
+  end
+
   def test_terminate_is_bounded_when_in_source_never_eofs
     h = @cleanup.process(Holder::Tenant.new("cat", in: never_eof_source).run)
     sleep 0.2
@@ -314,6 +372,20 @@ class HolderTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     h.wait
 
     assert_dead_within 2, grandchild
+  end
+
+  def test_wait_delivers_all_redirected_output_to_a_slow_sink
+    reader, writer = pipe
+    fill_pipe(writer)
+    h = spawn("dd", "if=/dev/zero", "bs=512", "count=16", out: writer)
+    waiter = Thread.new { h.wait }
+    # Sit past the teardown drain bound: if wait deadline-killed the pump the
+    # way terminate does, the child's 8 KiB would be lost by now.
+    sleep Holder::Handle::PUMP_GRACE + 0.4
+    zeros = drain_zero_bytes(reader, 8192, deadline: Clock.monotonic + 1)
+    waiter.join
+
+    assert_equal 8192, zeros
   end
 
   def test_term_ignoring_grandchild_is_force_killed_after_leader_exits
@@ -429,6 +501,15 @@ class HolderTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     handle.terminate(grace: 0.5)
 
     assert_kind_of RuntimeError, handle.pump_error
+  end
+
+  def test_pump_error_prefers_the_drain_pumps_error
+    feed = Thread.new { RuntimeError.new("feed broke") }
+    drain = Thread.new { RuntimeError.new("drain broke") }
+    handle = handle_with_pumps(pump_threads: [feed, drain], drain_pump: drain)
+    handle.terminate(grace: 0.5)
+
+    assert_equal "drain broke", handle.pump_error.message
   end
 
   def test_stream_matcher_does_not_patch_core_io

@@ -69,12 +69,12 @@ module Holder
       sout_pipe = piped[:sout]
       serr_pipe = piped[:serr] # nil for popen2 (stderr isn't piped there)
 
-      pumps = []
       # feed a redirected in: into the stdin pipe, then close it so the child
       # reads EOF and can exit on its own (Open3.capture3's `i.close`)
-      pumps << pump(u_sin, sin_pipe, close_after: true) if u_sin
-      # drain a redirected out: from the stdout pipe into the caller's IO
-      pumps << pump(sout_pipe, u_sout) if u_sout
+      feed_pump = pump(u_sin, sin_pipe, close_after: true) if u_sin
+      # drain a redirected out: from the stdout pipe into the caller's IO; the
+      # handle knows it apart so wait can deliver it to the last byte
+      drain_pump = pump(sout_pipe, u_sout) if u_sout
       # a redirected err: went direct via popen2 -- no pump
 
       Handle.new(
@@ -83,7 +83,8 @@ module Holder
         stdout: u_sout ? nil : sout_pipe,
         stderr: u_serr ? nil : serr_pipe,
         wait_thread: piped.fetch(:wait),
-        pump_threads: pumps,
+        pump_threads: [feed_pump, drain_pump].compact,
+        drain_pump:,
         owned_ios: [sin_pipe, sout_pipe, serr_pipe].compact,
       )
     end

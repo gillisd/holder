@@ -14,7 +14,12 @@ module Holder
   # thread-safe, and callable from any thread. terminate and interrupt are the
   # same robust teardown differing only in the first signal: send it, wait
   # GRACE for the group to die, then guarantee death with SIGKILL, reap the
-  # child, join the pumps, and close the pipes we own.
+  # child, join the pumps, and close the pipes we own. Concurrent teardowns
+  # share one escalation clock -- the earliest deadline any caller asked for
+  # wins -- so a terminate(grace: 0) is never wedged behind another caller's
+  # longer grace. wait is the passive counterpart: no first signal, leftovers
+  # killed outright, and a redirected out: sink drained to the last byte
+  # rather than deadline-killed, however slow that sink is.
   class Handle
     # seconds to wait after the first signal before escalating to SIGKILL
     GRACE = 5
@@ -28,16 +33,19 @@ module Holder
 
     attr_reader :stdin, :stdout, :stderr, :pid, :pump_error
 
-    def initialize(stdin:, stdout:, stderr:, wait_thread:, pump_threads:, owned_ios:) # rubocop:disable Metrics/ParameterLists
+    def initialize(stdin:, stdout:, stderr:, wait_thread:, pump_threads:, owned_ios:, drain_pump: nil) # rubocop:disable Metrics/MethodLength, Metrics/ParameterLists
       @stdin = stdin
       @stdout = stdout
       @stderr = stderr
       @wait_thread = wait_thread
       @pump_threads = pump_threads
+      @drain_pump = drain_pump
       @owned_ios = owned_ios
       @pid = wait_thread.pid
       @pump_error = nil
       @mutex = Mutex.new
+      @escalation_tick = ConditionVariable.new
+      @kill_deadline = nil
     end
 
     def terminate(grace: GRACE) = teardown("TERM", grace)
@@ -52,18 +60,14 @@ module Holder
       # the process exited on its own. finalize runs under the mutex and is
       # idempotent, so a terminate signal that finalizes first is harmless.
       status = @wait_thread.value
-      @mutex.synchronize do
-        # The leader exited on its own, but a grandchild it backgrounded can
-        # outlive it in the same group -- so reap the group before finalizing, or
-        # wait would leave it orphaned (no child left behind). wait is passive
-        # (it sent no first signal), so leftovers are killed outright rather than
-        # given grace. The KILL is guarded on group membership: only fire while
-        # the group still has members, so its pgid is reserved and the signal
-        # can't hit a recycled pid. Killing first also lets an out:/in: pump
-        # drain instead of stalling on a pipe the grandchild held open.
-        signal_group("KILL") if group_alive?
-        finalize
-      end
+      @mutex.synchronize { kill_group_leftovers }
+      # The child exited on its own, so bytes still buffered toward an out:
+      # sink are real output the caller asked for -- join the drain pump
+      # unbounded and deliver every one of them. Outside the mutex, so a
+      # concurrent terminate stays free to cut a wedged sink short: its pump
+      # kill makes this join return.
+      @drain_pump&.join
+      @mutex.synchronize { finalize }
       status
     end
 
@@ -73,18 +77,20 @@ module Holder
       @mutex.synchronize do
         # Always signal the group, even if the leader has already exited: an
         # orphaned grandchild keeps the leader's pgid, so the group outlives
-        # the leader and still needs the signal. signal_group rescues ESRCH if
-        # the group is genuinely empty.
+        # the leader and still needs the signal. signal_group rescues the
+        # empty-group case.
         signal_group(signal)
         # Grace is measured against the whole GROUP, not just the leader: poll
         # membership so a grandchild the leader backgrounded gets the same grace
-        # to shut down cleanly. Then KILL whatever is left -- but only while the
-        # group still has members, so its pgid is reserved and the signal can't
-        # land on a recycled pid.
+        # to shut down cleanly, then KILL whatever is left. The membership guard
+        # narrows -- but cannot close -- the window in which a recycled pgid
+        # could be signalled: kill(0) has no way to prove the group is still
+        # ours, an inherent hazard of addressing processes by id.
         await_group_exit(grace)
         signal_group("KILL") if group_alive?
         @wait_thread.join
         finalize
+        @kill_deadline = nil
         @wait_thread.value
       end
     end
@@ -98,11 +104,38 @@ module Holder
       # nothing left to signal.
     end
 
-    # Block until the process group is empty or +grace+ seconds elapse.
+    # Block until the process group is empty or the shared kill deadline
+    # passes. Concurrent teardowns tighten one clock -- the earliest requested
+    # deadline wins -- and each tick releases the mutex, so a second caller is
+    # never wedged behind an in-flight grace window: it gets in, tightens the
+    # deadline, and every caller escalates together.
     def await_group_exit(grace)
-      deadline = Process.clock_gettime(Process::CLOCK_MONOTONIC) + grace
-      sleep POLL while group_alive? && Process.clock_gettime(Process::CLOCK_MONOTONIC) < deadline
+      requested = monotonic + grace
+      @kill_deadline = [@kill_deadline || requested, requested].min
+      while group_alive?
+        deadline = @kill_deadline
+        break if deadline.nil? || monotonic >= deadline
+
+        @escalation_tick.wait(@mutex, POLL)
+      end
     end
+
+    # wait sent no first signal, so group leftovers get no grace: a grandchild
+    # that outlived the leader is killed outright (no child left behind), which
+    # also releases any pipe end it held open so wait's drain can finish.
+    # Unless a terminate/interrupt is mid-grace -- then honor its window rather
+    # than cutting it short, and fire its overdue KILL ourselves only if that
+    # teardown never escalated (its thread may have died mid-flight).
+    def kill_group_leftovers
+      while group_alive?
+        deadline = @kill_deadline
+        break signal_group("KILL") if deadline.nil? || monotonic >= deadline
+
+        @escalation_tick.wait(@mutex, POLL)
+      end
+    end
+
+    def monotonic = Process.clock_gettime(Process::CLOCK_MONOTONIC)
 
     # True while any signalable process remains in the group. Signal 0 probes the
     # group without delivering anything: ESRCH means it is empty, and on macOS/BSD
@@ -127,16 +160,20 @@ module Holder
     # ($stdin, an open socket), or an out: sink that never drains -- and its
     # remaining work is moot now that the child is gone. Thread#kill unblocks
     # copy_stream's read/write and runs the pump's ensure (which closes its
-    # pipe); a killed pump's #value is nil, so it's ignored here while a genuine
-    # captured error is still surfaced as pump_error.
+    # pipe); a killed pump's #value is nil, so it's ignored here. Of the
+    # genuine captured errors, the drain pump's outranks the feed pump's: a
+    # failed drain lost output the caller redirected, while a failed feed
+    # merely starved a child that is already gone.
     def reap_pumps
-      @pump_threads.filter_map do |t|
-        unless t.join(PUMP_GRACE)
-          (t.kill
-           t.join)
+      errors = @pump_threads.filter_map do |pump|
+        unless pump.join(PUMP_GRACE)
+          pump.kill
+          pump.join
         end
-        t.value
-      end.first
+        error = pump.value
+        [pump, error] if error
+      end.to_h
+      errors[@drain_pump] || errors.values.first
     end
   end
 end
