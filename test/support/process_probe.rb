@@ -25,8 +25,10 @@ class ProcessProbe
   private
 
   def read_state
-    File.read("/proc/#{@pid}/status")[/State:\s*(\w)/, 1]
-  rescue SystemCallError
-    nil
+    begin
+      File.read("/proc/#{@pid}/status")[/State:\s*(\w)/, 1]
+    rescue SystemCallError
+      nil
+    end
   end
 end

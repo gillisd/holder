@@ -32,9 +32,11 @@ class Cleanup
 
   def run
     @deferred.reverse_each do |action|
-      action.call
-    rescue StandardError # rubocop:disable Claude/NoOverlyDefensiveCode
-      nil
+      begin
+        action.call
+      rescue StandardError
+        nil
+      end
     end
   end
 
