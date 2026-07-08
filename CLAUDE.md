@@ -12,9 +12,7 @@ It leans on ruby's own open3 library, whilst handling the parts that open3 doesn
 
 2. **Idiomatic, current-generation code only.** Always write idiomatic Ruby, and idiomatic usage of whatever gems/frameworks this project depends on. This is a greenfield project on the latest version of every tool — use the newest APIs and patterns, never deprecated or legacy-compatibility ones.
 
-3. **Cross-reference the bundled framework docs before writing framework code.** Any line in a framework-related file (Rails, Sinatra, Hanami, etc., whichever this project uses) must first be checked against the bundled reference docs to confirm it follows the latest idiomatic pattern. Never write framework code from memory alone.
-
-4. **Prefer Ruby's own idioms and standard library over manual, low-level equivalents**, unless impossible. `Enumerable`/`Comparable` methods over hand-rolled loops, `Fiber`/`Async`-style concurrency over raw `Thread`/`Mutex` bookkeeping, `Time`/`Date`/`ActiveSupport::Duration` idioms over manual arithmetic, and the rest of Ruby's rich standard library and ecosystem over reinventing it.
+3. **Cross-reference the bundled framework docs before writing framework code.** Any line in a framework-related file (Rails, Sinatra, Hanami, etc., whichever this project uses) must first be checked against the bundled reference docs to confirm it follows the latest idiomatic pattern. Never write framework code from memory alone. Also use ruby-lsp to assist with writing.
 
 5. **Self-documenting code over comments.** Communicate intent primarily through naming:
    - Well-named local variables (noun) and methods (verb) can often articulate the same thing a one line comment can.
@@ -25,7 +23,7 @@ It leans on ruby's own open3 library, whilst handling the parts that open3 doesn
      - the _recipient_ (if any) of those behaviors (return value)
    - If you have truly exhausted the above, then a comment is recommended.
 
-6. **Avoid vague "-or"/"-er" names** (e.g. `LineProcessor`, `DataManager`). Only use one when Ruby or its frameworks spec it out as a defined architectural role — like Rails does with `Controller` or `Serializer` — with its own responsibilities and conventions, not just a common-sounding name you've assigned yourself.
+6. **Avoid vague "-or"/"-er" names** (e.g. `LineProcessor`, `DataManager`). Only use one when Ruby or its frameworks spec it out as a defined architectural role — like Rails does with `Controller` or `Serializer` — with its own responsibilities and conventions, not just a common-sounding name you've assigned yourself. Despite this gem being called "holder", it does not have a class with the same name - it leans on a properly named domain model.
 
 7. **"Done" means done**, as defined in the next section.
 
