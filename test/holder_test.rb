@@ -8,7 +8,10 @@ require "timeout"
 class HolderTest < Minitest::Test # rubocop:disable Metrics/ClassLength
   include FileUtils
 
-  parallelize_me!
+  # Run serially: the fd/thread-leak tests sample process-global counts, which
+  # concurrent tests would pollute with their own transient pipes and pump
+  # threads. Minitest's parallel executor is shared across classes, so isolating
+  # these reliably means the suite runs without parallelize_me!.
 
   TEST_TIMEOUT = 3
   LEAK_CYCLES = 30
@@ -44,6 +47,15 @@ class HolderTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     @cleanup.path(path)
   end
 
+  # A named pipe a child can block on in-process with `read <> fifo`: opening it
+  # read-write makes the child its own writer, so the read blocks (never hits
+  # EOF) with no forked `sleep` for a signal to race during its fork/exec.
+  def blocking_fifo
+    path = "/tmp/holder_#{$PROCESS_ID}_#{rand(1_000_000)}.fifo"
+    File.mkfifo(path)
+    @cleanup.path(path)
+  end
+
   def input_io(content)
     path = tmpfile
     File.write(path, content)
@@ -61,7 +73,9 @@ class HolderTest < Minitest::Test # rubocop:disable Metrics/ClassLength
   end
 
   def fd_count
-    Pathname.new("/proc/#{Process.pid}/fd").children.size
+    # /dev/fd lists the current process's open descriptors on both Linux (a
+    # symlink to /proc/self/fd) and macOS (a devfs), so it counts FDs portably.
+    Dir.children("/dev/fd").size
   end
 
   def elapsed
@@ -324,10 +338,13 @@ class HolderTest < Minitest::Test # rubocop:disable Metrics/ClassLength
 
   def test_terminate_grants_grace_to_a_cooperative_backgrounded_grandchild
     marker = tmpfile
+    fifo = blocking_fifo
     # The grandchild traps TERM to shut down cleanly (write the marker), then
     # prints its pid only AFTER the trap is installed -- so reading the pid means
-    # terminate can't race ahead of the trap.
-    body = %(trap "sleep 0.3; echo done > #{marker}; exit 0" TERM; echo $$; sleep #{OUTLIVES_TEST})
+    # terminate can't race ahead of the trap. It idles by blocking in-process on
+    # the fifo rather than a forked `sleep`, so teardown's TERM is delivered
+    # straight to the trap and can't be lost racing a `sleep` mid fork/exec.
+    body = %(trap "sleep 0.3; echo done > #{marker}; exit 0" TERM; echo $$; read _ <> #{fifo})
     h = @cleanup.process(Holder::Tenant.new("sh", "-c", %(sh -c '#{body}' &)).run)
     grandchild = live_pid_from(h.stdout)
     wait_for_exit(h.pid)
@@ -446,6 +463,8 @@ class HolderTest < Minitest::Test # rubocop:disable Metrics/ClassLength
     Holder::Tenant.new("sh", "-c", "pwd", out: out, chdir: dir).run.wait
     out.close
 
-    assert_equal dir, File.read(out.path).strip
+    # Compare canonical paths: macOS resolves /tmp through the /private symlink,
+    # so the child reports /private/tmp/... while dir is /tmp/... -- same directory.
+    assert_equal File.realpath(dir), File.realpath(File.read(out.path).strip)
   end
 end

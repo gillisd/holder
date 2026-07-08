@@ -91,9 +91,11 @@ module Holder
 
     def signal_group(signal)
       Process.kill("-#{signal}", @pid)
-    rescue Errno::ESRCH
-      # the group is empty (leader already reaped and no surviving members);
-      # nothing to signal
+    rescue Errno::ESRCH, Errno::EPERM
+      # Nothing signalable remains in the group. Linux reports the empty group as
+      # ESRCH; macOS/BSD reports EPERM once the only survivor is an unreaped
+      # zombie (a defunct process can't be signalled). Either way, there is
+      # nothing left to signal.
     end
 
     # Block until the process group is empty or +grace+ seconds elapse.
@@ -102,12 +104,14 @@ module Holder
       sleep POLL while group_alive? && Process.clock_gettime(Process::CLOCK_MONOTONIC) < deadline
     end
 
-    # True while any process remains in the group. Signal 0 probes the group
-    # without delivering anything; ESRCH means it is empty.
+    # True while any signalable process remains in the group. Signal 0 probes the
+    # group without delivering anything: ESRCH means it is empty, and on macOS/BSD
+    # EPERM means the only survivor is an unreaped zombie -- effectively dead, so
+    # both mean the group is no longer alive.
     def group_alive?
       Process.kill(0, -@pid)
       true
-    rescue Errno::ESRCH
+    rescue Errno::ESRCH, Errno::EPERM
       false
     end
 

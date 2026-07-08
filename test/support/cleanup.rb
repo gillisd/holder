@@ -31,10 +31,14 @@ class Cleanup
   end
 
   def run
+    # Best-effort teardown: one action failing (a pid already reaped, an IO
+    # already closed, a path already gone) must never stop the rest from running,
+    # so every error is deliberately swallowed -- the contract verified by
+    # CleanupTest#test_run_continues_after_an_action_raises.
     @deferred.reverse_each do |action|
       begin
         action.call
-      rescue StandardError
+      rescue StandardError # rubocop:disable Claude/NoOverlyDefensiveCode
         nil
       end
     end
