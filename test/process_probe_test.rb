@@ -1,8 +1,6 @@
 require "test_helper"
 
 class ProcessProbeTest < Minitest::Test
-  parallelize_me!
-
   def setup
     @pids = []
   end
@@ -65,8 +63,6 @@ class ProcessProbeTest < Minitest::Test
   end
 
   def zombie?(pid)
-    File.read("/proc/#{pid}/status")[/State:\s*(\w)/, 1] == "Z"
-  rescue SystemCallError
-    false
+    ProcessProbe.new(pid).zombie?
   end
 end
