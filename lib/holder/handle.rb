@@ -91,8 +91,8 @@ module Holder
         # membership so a grandchild the leader backgrounded gets the same grace
         # to shut down cleanly, then KILL whatever is left. The membership guard
         # narrows -- but cannot close -- the window in which a recycled pgid
-        # could be signalled: kill(0) has no way to prove the group is still
-        # ours, an inherent hazard of addressing processes by id.
+        # could be signalled: probing the group's liveness has no way to prove the
+        # group is still ours, an inherent hazard of addressing processes by id.
         await_group_exit(grace)
         signal_group("KILL") if group_alive?
         @wait_thread.join
@@ -149,22 +149,17 @@ module Holder
 
     def monotonic = Process.clock_gettime(Process::CLOCK_MONOTONIC)
 
-    # True while any signalable process remains in the group. Signal 0 probes the
-    # group without delivering anything: the group is no longer alive only when the
-    # probe raises a GROUP_GONE error (an empty group everywhere, plus a zombie-only
-    # group on macOS/BSD). A Linux EPERM -- alive but unsignalable -- is not caught
-    # here and surfaces to the caller rather than masquerading as a dead group.
+    # True while the process group still has a member. getpriority with PRIO_PGRP
+    # probes the group directly by its (positive) group id and sends no signal,
+    # raising ESRCH once the group is empty. Reading a group's priority needs no
+    # permission to signal its members, so a live-but-unsignalable group correctly
+    # reads as alive here -- the EPERM then surfaces where we actually signal it,
+    # in signal_group.
     def group_alive?
       begin
-        Process.kill(0, -@pid)
+        Process.getpriority(Process::PRIO_PGRP, @pid)
         true
       rescue Errno::ESRCH
-        false
-      rescue Errno::EPERM
-        # See EPERM_MEANS_GONE: gone on macOS/BSD, but on Linux the group is alive
-        # and unsignalable, which must surface rather than read as a dead group.
-        raise unless EPERM_MEANS_GONE
-
         false
       end
     end
