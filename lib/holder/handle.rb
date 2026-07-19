@@ -31,6 +31,13 @@ module Holder
     # interval between process-group liveness polls while awaiting the grace window
     POLL = 0.02
 
+    # Whether an EPERM from a group signal means the group is gone. macOS/BSD
+    # report a zombie-only group (its last survivor a defunct process) as EPERM,
+    # so there it means gone. Linux never reports EPERM for a group we own -- there
+    # EPERM means the group is alive but unsignalable (e.g. a child that dropped
+    # privilege), which must surface rather than be mistaken for an empty group.
+    EPERM_MEANS_GONE = !RUBY_PLATFORM.include?("linux")
+
     attr_reader :stdin, :stdout, :stderr, :pid, :pump_error
 
     def initialize(stdin:, stdout:, stderr:, wait_thread:, pump_threads:, owned_ios:, drain_pump: nil) # rubocop:disable Metrics/MethodLength, Metrics/ParameterLists
@@ -96,12 +103,17 @@ module Holder
     end
 
     def signal_group(signal)
-      Process.kill("-#{signal}", @pid)
-    rescue Errno::ESRCH, Errno::EPERM
-      # Nothing signalable remains in the group. Linux reports the empty group as
-      # ESRCH; macOS/BSD reports EPERM once the only survivor is an unreaped
-      # zombie (a defunct process can't be signalled). Either way, there is
-      # nothing left to signal.
+      begin
+        Process.kill("-#{signal}", @pid)
+      rescue Errno::ESRCH
+        # An empty group -- the leader is reaped and no members survive; nothing
+        # left to signal.
+      rescue Errno::EPERM
+        # macOS/BSD: a zombie-only group, also nothing left to signal. Linux: the
+        # group is alive but unsignalable -- surface it rather than silently
+        # treating the group as reaped.
+        raise unless EPERM_MEANS_GONE
+      end
     end
 
     # Block until the process group is empty or the shared kill deadline
@@ -138,14 +150,23 @@ module Holder
     def monotonic = Process.clock_gettime(Process::CLOCK_MONOTONIC)
 
     # True while any signalable process remains in the group. Signal 0 probes the
-    # group without delivering anything: ESRCH means it is empty, and on macOS/BSD
-    # EPERM means the only survivor is an unreaped zombie -- effectively dead, so
-    # both mean the group is no longer alive.
+    # group without delivering anything: the group is no longer alive only when the
+    # probe raises a GROUP_GONE error (an empty group everywhere, plus a zombie-only
+    # group on macOS/BSD). A Linux EPERM -- alive but unsignalable -- is not caught
+    # here and surfaces to the caller rather than masquerading as a dead group.
     def group_alive?
-      Process.kill(0, -@pid)
-      true
-    rescue Errno::ESRCH, Errno::EPERM
-      false
+      begin
+        Process.kill(0, -@pid)
+        true
+      rescue Errno::ESRCH
+        false
+      rescue Errno::EPERM
+        # See EPERM_MEANS_GONE: gone on macOS/BSD, but on Linux the group is alive
+        # and unsignalable, which must surface rather than read as a dead group.
+        raise unless EPERM_MEANS_GONE
+
+        false
+      end
     end
 
     def finalize
