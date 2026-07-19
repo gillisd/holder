@@ -18,8 +18,8 @@ module Holder
   # share one escalation clock -- the earliest deadline any caller asked for
   # wins -- so a terminate(grace: 0) is never wedged behind another caller's
   # longer grace. wait is the passive counterpart: no first signal, leftovers
-  # killed outright, and a redirected out: sink drained to the last byte
-  # rather than deadline-killed, however slow that sink is.
+  # killed outright, and a redirected out: sink drained well past a teardown's
+  # grace -- though bounded, so a sink that never drains can't wedge wait forever.
   class Handle
     # seconds to wait after the first signal before escalating to SIGKILL
     GRACE = 5
@@ -30,6 +30,11 @@ module Holder
 
     # interval between process-group liveness polls while awaiting the grace window
     POLL = 0.02
+
+    # seconds wait keeps delivering a redirected out: sink's buffered output --
+    # patient well past a teardown's PUMP_GRACE -- before giving up on a sink that
+    # never drains, so a wedged sink cannot block wait forever
+    WAIT_DRAIN_GRACE = 2
 
     # Whether an EPERM from a group signal means the group is gone. macOS/BSD
     # report a zombie-only group (its last survivor a defunct process) as EPERM,
@@ -68,17 +73,25 @@ module Holder
       # idempotent, so a terminate signal that finalizes first is harmless.
       status = @wait_thread.value
       @mutex.synchronize { kill_group_leftovers }
-      # The child exited on its own, so bytes still buffered toward an out:
-      # sink are real output the caller asked for -- join the drain pump
-      # unbounded and deliver every one of them. Outside the mutex, so a
-      # concurrent terminate stays free to cut a wedged sink short: its pump
-      # kill makes this join return.
-      @drain_pump&.join
+      deliver_redirected_output
       @mutex.synchronize { finalize }
       status
     end
 
     private
+
+    # The child exited on its own, so bytes still buffered toward an out: sink are
+    # real output the caller asked for -- join the drain pump so it delivers them,
+    # patient well past a teardown's PUMP_GRACE. But a sink that never drains (a
+    # full pipe whose reader never reads) would wedge wait forever, so give up
+    # after WAIT_DRAIN_GRACE and kill the pump. Runs outside the mutex, so a
+    # concurrent terminate can still cut a wedged sink short even sooner.
+    def deliver_redirected_output
+      return if @drain_pump.nil? || @drain_pump.join(WAIT_DRAIN_GRACE)
+
+      @drain_pump.kill
+      @drain_pump.join
+    end
 
     def teardown(signal, grace)
       @mutex.synchronize do
