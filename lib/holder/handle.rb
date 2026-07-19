@@ -19,7 +19,7 @@ module Holder
   # wins -- so a terminate(grace: 0) is never wedged behind another caller's
   # longer grace. wait is the passive counterpart: no first signal, leftovers
   # killed outright, and a redirected out: sink drained well past a teardown's
-  # grace -- though bounded, so a sink that never drains can't wedge wait forever.
+  # PUMP_GRACE -- though bounded, so a sink that never drains can't wedge wait.
   class Handle
     # seconds to wait after the first signal before escalating to SIGKILL
     GRACE = 5
@@ -72,9 +72,14 @@ module Holder
       # the process exited on its own. finalize runs under the mutex and is
       # idempotent, so a terminate signal that finalizes first is harmless.
       status = @wait_thread.value
-      @mutex.synchronize { kill_group_leftovers }
-      deliver_redirected_output
-      @mutex.synchronize { finalize }
+      begin
+        @mutex.synchronize { kill_group_leftovers }
+        deliver_redirected_output
+      ensure
+        # finalize even if reaping the group raised (an unsignalable group surfaces
+        # EPERM), so the owned pipes are always closed.
+        @mutex.synchronize { finalize }
+      end
       status
     end
 
@@ -95,24 +100,35 @@ module Holder
 
     def teardown(signal, grace)
       @mutex.synchronize do
-        # Always signal the group, even if the leader has already exited: an
-        # orphaned grandchild keeps the leader's pgid, so the group outlives
-        # the leader and still needs the signal. signal_group rescues the
-        # empty-group case.
-        signal_group(signal)
-        # Grace is measured against the whole GROUP, not just the leader: poll
-        # membership so a grandchild the leader backgrounded gets the same grace
-        # to shut down cleanly, then KILL whatever is left. The membership guard
-        # narrows -- but cannot close -- the window in which a recycled pgid
-        # could be signalled: probing the group's liveness has no way to prove the
-        # group is still ours, an inherent hazard of addressing processes by id.
-        await_group_exit(grace)
-        signal_group("KILL") if group_alive?
-        @wait_thread.join
-        finalize
-        @kill_deadline = nil
+        begin
+          escalate(signal, grace)
+        ensure
+          # Close our pipes and reap the pumps even when escalate raised -- a group
+          # we cannot signal surfaces EPERM, and the handle's resources must still
+          # be released rather than leaked.
+          finalize
+          @kill_deadline = nil
+        end
         @wait_thread.value
       end
+    end
+
+    # Send the first signal, grant the whole GROUP grace to exit, then guarantee
+    # death with SIGKILL and reap the leader.
+    def escalate(signal, grace)
+      # Always signal the group, even if the leader has already exited: an orphaned
+      # grandchild keeps the leader's pgid, so the group outlives the leader and
+      # still needs the signal. signal_group rescues the empty-group case.
+      signal_group(signal)
+      # Grace is measured against the whole GROUP, not just the leader: poll
+      # membership so a grandchild the leader backgrounded gets the same grace to
+      # shut down cleanly, then KILL whatever is left. The membership guard narrows
+      # -- but cannot close -- the window in which a recycled pgid could be
+      # signalled: probing liveness cannot prove the group is still ours, an
+      # inherent hazard of addressing processes by id.
+      await_group_exit(grace)
+      signal_group("KILL") if group_alive?
+      @wait_thread.join
     end
 
     def signal_group(signal)
@@ -164,15 +180,15 @@ module Holder
 
     # True while the process group still has a member. getpriority with PRIO_PGRP
     # probes the group directly by its (positive) group id and sends no signal,
-    # raising ESRCH once the group is empty. Reading a group's priority needs no
-    # permission to signal its members, so a live-but-unsignalable group correctly
-    # reads as alive here -- the EPERM then surfaces where we actually signal it,
-    # in signal_group.
+    # raising ESRCH once the group is empty. On Linux reading a group's priority
+    # needs no permission, so a live-but-unsignalable group correctly reads as
+    # alive and its EPERM surfaces where we actually signal it, in signal_group;
+    # macOS/BSD instead report a zombie-only group as EPERM, which means gone here.
     def group_alive?
       begin
         Process.getpriority(Process::PRIO_PGRP, @pid)
         true
-      rescue Errno::ESRCH
+      rescue Errno::ESRCH, Errno::EPERM
         false
       end
     end
