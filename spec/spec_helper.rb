@@ -14,6 +14,7 @@ support_loader.setup
 support_loader.eager_load
 
 require_relative "support/process_helpers"
+require_relative "support/setuid_dropper"
 
 RSpec.configure do |config|
   config.include ProcessHelpers
