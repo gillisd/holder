@@ -110,6 +110,7 @@ Metrics/BlockLength:
   Exclude:
     - "holder.gemspec"
     - "rakelib/**/*"
+    - "spec/**/*"
 
 # Gemspec and rake files use patterns that trigger Claude cops legitimately.
 Claude/NoFancyUnicode:
@@ -147,6 +148,7 @@ Style/Documentation:
   Enabled: true
   Exclude:
     - "test/**/*"
+    - "spec/**/*"
 
 # Trailing commas in multiline literals and arguments.
 Style/TrailingCommaInArrayLiteral:
