@@ -1,8 +1,16 @@
 require "bundler/gem_tasks"
 
-require "minitest/test_task"
+require "rspec/core/rake_task"
 
-Minitest::TestTask.create
+RSpec::Core::RakeTask.new(:spec)
+
+namespace :spec do
+  desc "Run the fast tier only -- pure logic, no child processes"
+  RSpec::Core::RakeTask.new(:unit) { |task| task.pattern = "spec/unit/**/*_spec.rb" }
+
+  desc "Run the integration tier only -- real children, timing budgets"
+  RSpec::Core::RakeTask.new(:integration) { |task| task.pattern = "spec/integration/**/*_spec.rb" }
+end
 
 require "rubocop/rake_task"
 RuboCop::RakeTask.new
@@ -21,4 +29,4 @@ namespace :zeitwerk do
   end
 end
 
-task default: [:test, :rubocop]
+task default: [:spec, :rubocop]

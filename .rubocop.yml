@@ -11,9 +11,9 @@
 
 plugins:
   - rubocop-claude
-  - rubocop-minitest
   - rubocop-performance
   - rubocop-rake
+  - rubocop-rspec
 
 AllCops:
   NewCops: enable
@@ -110,6 +110,15 @@ Metrics/BlockLength:
   Exclude:
     - "holder.gemspec"
     - "rakelib/**/*"
+    - "spec/**/*"
+
+# An integration example's subject is a behaviour, not a class -- "tearing down
+# a group whose leader has already exited" -- and several of them legitimately
+# drive the same class from different angles. So those files describe in prose.
+# Unit specs still describe their class, and their paths still have to match it.
+RSpec/DescribeClass:
+  Exclude:
+    - "spec/integration/**/*"
 
 # Gemspec and rake files use patterns that trigger Claude cops legitimately.
 Claude/NoFancyUnicode:
@@ -123,11 +132,6 @@ Claude/MysteryRegex:
 # Zeitwerk loaders are mutable by design — only flag literal mutable values.
 Style/MutableConstant:
   EnforcedStyle: literals
-
-# Minitest tests can legitimately need many assertions per method
-# when verifying multi-step operations.
-Minitest/MultipleAssertions:
-  Max: 10
 
 # Anonymous forwarding (*, **, &) breaks TruffleRuby, JRuby, and
 # Ruby < 3.2. Named args are explicit and portable.
@@ -146,7 +150,7 @@ Style/ClassAndModuleChildren:
 Style/Documentation:
   Enabled: true
   Exclude:
-    - "test/**/*"
+    - "spec/**/*"
 
 # Trailing commas in multiline literals and arguments.
 Style/TrailingCommaInArrayLiteral:

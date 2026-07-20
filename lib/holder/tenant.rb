@@ -40,13 +40,12 @@ module Holder
       # invariant is never overridden.
       meth = u_serr ? :popen2 : :popen3
       spawn_redirects = u_serr ? { err: u_serr } : {}
-      combined_kwargs = kwargs.merge(spawn_redirects)
 
       # Each form uses its matching Open3 form: block -> Open3's block form (its
       # close+reap is a backstop under our kill); no-block -> Open3's non-block
       # form (the handle owns teardown).
       if block_given?
-        Open3.public_send(meth, *args, pgroup:, **combined_kwargs) do |*streams|
+        Open3.public_send(meth, *args, **kwargs, pgroup:, **spawn_redirects) do |*streams|
           self.handle = build_handle(streams, meth, u_sin, u_sout, u_serr)
           begin
             yield handle
@@ -69,12 +68,12 @@ module Holder
       sout_pipe = piped[:sout]
       serr_pipe = piped[:serr] # nil for popen2 (stderr isn't piped there)
 
-      pumps = []
       # feed a redirected in: into the stdin pipe, then close it so the child
       # reads EOF and can exit on its own (Open3.capture3's `i.close`)
-      pumps << pump(u_sin, sin_pipe, close_after: true) if u_sin
-      # drain a redirected out: from the stdout pipe into the caller's IO
-      pumps << pump(sout_pipe, u_sout) if u_sout
+      feed_pump = pump(u_sin, sin_pipe, close_after: true) if u_sin
+      # drain a redirected out: from the stdout pipe into the caller's IO; the
+      # handle knows it apart so wait can deliver it to the last byte
+      drain_pump = pump(sout_pipe, u_sout) if u_sout
       # a redirected err: went direct via popen2 -- no pump
 
       Handle.new(
@@ -83,22 +82,46 @@ module Holder
         stdout: u_sout ? nil : sout_pipe,
         stderr: u_serr ? nil : serr_pipe,
         wait_thread: piped.fetch(:wait),
-        pump_threads: pumps,
+        pump_threads: [feed_pump, drain_pump].compact,
+        drain_pump:,
         owned_ios: [sin_pipe, sout_pipe, serr_pipe].compact,
       )
     end
 
+    # The pump's value is its failure report: nil for a clean copy (or one cut
+    # short by teardown races), otherwise the first error worth surfacing --
+    # copying outranks closing, since a failed copy is the earlier cause. The
+    # close lives in an ensure so a pump killed mid-copy still closes its pipe;
+    # a killed pump never reaches the trailing expression, so its value stays
+    # nil as reap_pumps expects.
     def pump(src, destination, close_after: false)
       Thread.new do
-        IO.copy_stream(src, destination)
-        nil
-      rescue IOError, Errno::EPIPE, Errno::EBADF
-        nil # source/dest torn down underneath us (the EPIPE Open3.capture3 swallows)
-      rescue StandardError => e
-        e # unexpected (e.g. ENOSPC writing a redirect); capture so teardown finishes
-      ensure
-        destination.close if close_after && !destination.closed?
+        error = nil
+        begin
+          error = copy_error(src, destination)
+        ensure
+          error ||= (close_error(destination) if close_after)
+        end
+        error
       end
+    end
+
+    def copy_error(src, destination)
+      IO.copy_stream(src, destination)
+      nil
+    rescue IOError, Errno::EPIPE, Errno::EBADF
+      nil # source/dest torn down underneath us (the EPIPE Open3.capture3 swallows)
+    rescue StandardError => e
+      e # unexpected (e.g. ENOSPC writing a redirect); capture so teardown finishes
+    end
+
+    def close_error(destination)
+      destination.close unless destination.closed?
+      nil
+    rescue IOError, Errno::EPIPE, Errno::EBADF
+      nil # already torn down underneath us, same as a copy hitting a closed pipe
+    rescue StandardError => e
+      e # a close that lost buffered writes; capture so teardown finishes
     end
   end
 end

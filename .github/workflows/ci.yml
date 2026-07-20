@@ -2,18 +2,26 @@ name: CI
 
 on:
   push:
-    branches: [main, master]
+    branches: ['**']
   pull_request:
     branches: [main, master]
+  workflow_dispatch:
 
 permissions:
   contents: read
 
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   test:
-    runs-on: ubuntu-latest
+    name: test (${{ matrix.os }}, ruby ${{ matrix.ruby-version }})
+    runs-on: ${{ matrix.os }}
     strategy:
+      fail-fast: false
       matrix:
+        os: [ubuntu-latest, macos-latest]
         ruby-version: ['4.0.1']
     steps:
     - uses: actions/checkout@v4
@@ -22,7 +30,9 @@ jobs:
       with:
         ruby-version: ${{ matrix.ruby-version }}
         bundler-cache: true
-    - name: Run tests
-      run: bundle exec rake test
+    - name: Run unit specs
+      run: bundle exec rake spec:unit
+    - name: Run integration specs
+      run: bundle exec rake spec:integration
     - name: Run RuboCop
       run: bundle exec rake rubocop
