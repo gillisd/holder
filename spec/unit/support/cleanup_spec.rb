@@ -27,6 +27,23 @@ RSpec.describe Cleanup do
       expect(removed_paths).to eq(["second", "first"])
     end
 
+    context "when one deferred action hangs instead of raising" do
+      # The teardown a wedged example leaves behind is the one most likely to
+      # hang: a handle whose terminate is exactly what went wrong. Bounding only
+      # raising actions would let that strand every action registered beneath it,
+      # and the example's own watchdog cannot help -- it has already fired.
+      subject(:cleanup) { described_class.new(action_grace: 0.05) }
+
+      it "gives up on it and undoes the rest anyway" do
+        cleanup.path("beneath")
+        cleanup.instance_eval { defer { sleep 30 } }
+
+        cleanup.run
+
+        expect(removed_paths).to eq(["beneath"])
+      end
+    end
+
     context "when one deferred action raises" do
       # Teardown is best-effort: a pid already reaped, an IO already closed or a
       # path already gone must never strand the actions registered beneath it.
