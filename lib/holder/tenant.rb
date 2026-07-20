@@ -40,13 +40,12 @@ module Holder
       # invariant is never overridden.
       meth = u_serr ? :popen2 : :popen3
       spawn_redirects = u_serr ? { err: u_serr } : {}
-      combined_kwargs = kwargs.merge(spawn_redirects)
 
       # Each form uses its matching Open3 form: block -> Open3's block form (its
       # close+reap is a backstop under our kill); no-block -> Open3's non-block
       # form (the handle owns teardown).
       if block_given?
-        Open3.public_send(meth, *args, pgroup:, **combined_kwargs) do |*streams|
+        Open3.public_send(meth, *args, **kwargs, pgroup:, **spawn_redirects) do |*streams|
           self.handle = build_handle(streams, meth, u_sin, u_sout, u_serr)
           begin
             yield handle
