@@ -1,13 +1,14 @@
 require "tmpdir"
 
 ##
-# Builds a throwaway setuid-root helper whose *leader* drops to +nobody+ and then
-# execs +sleep+, giving the specs a real process group that a non-root supervisor
-# genuinely cannot signal (every kill raises EPERM). command builds it once and
-# returns its path, or nil when the host can't provide one -- no passwordless
-# sudo, no C compiler, a nosuid mount, or running as root (which can signal
-# anyone) -- so the example skips instead of failing. remove tears it back down.
-module SetuidDropper
+# The command the specs run when they need a real process group that a non-root
+# supervisor genuinely cannot signal (every kill raises EPERM): a throwaway
+# setuid-root helper whose *leader* drops to +nobody+ and then execs +sleep+.
+# path builds it once and returns where it landed, or nil when the host can't
+# provide one -- no passwordless sudo, no C compiler, a nosuid mount, or running
+# as root (which can signal anyone) -- so the example skips instead of failing.
+# remove tears it back down.
+module UnsignalableCommand
   NOBODY = 65_534
   BIN = "/usr/local/bin/holder_spec_drop_sleep".freeze
   SOURCE = <<~C.freeze
@@ -24,10 +25,10 @@ module SetuidDropper
 
   module_function
 
-  def command
-    return @command if defined?(@command)
+  def path
+    return @path if defined?(@path)
 
-    @command = usable_host? && install && drops_to_nobody? ? BIN : nil
+    @path = usable_host? && install && drops_to_nobody? ? BIN : nil
   end
 
   def remove

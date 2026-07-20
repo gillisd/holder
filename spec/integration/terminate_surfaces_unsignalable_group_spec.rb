@@ -1,12 +1,12 @@
 RSpec.describe Holder::Handle do
   describe "#terminate when the process group is alive but cannot be signalled" do
-    after(:all) { SetuidDropper.remove }
+    after(:all) { UnsignalableCommand.remove }
 
     it "surfaces the permission error instead of hanging or reporting a clean teardown" do
-      dropper = SetuidDropper.command
-      skip "host cannot host a setuid-root helper (needs a non-root uid, cc, passwordless sudo)" unless dropper
+      command = UnsignalableCommand.path
+      skip "host cannot host a setuid-root helper (needs a non-root uid, cc, passwordless sudo)" unless command
 
-      handle = spawn_process(dropper)
+      handle = spawn_process(command)
       @leaked_pgid = Process.getpgid(handle.pid)
       sleep 0.4
 
