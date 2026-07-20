@@ -188,9 +188,10 @@ off and the discarded output surfaces as a `StalledSinkError` in `#pump_error`
 
 After checking out the repo, run `bundle install` to install dependencies. Then:
 
-- `rake test` — run the test suite
+- `rake test` — run the minitest suite
+- `rake spec` — run the RSpec integration specs
 - `rake rubocop` — run the linter
-- `rake` — run both (the default task)
+- `rake` — run all three (the default task)
 - `rake zeitwerk:validate` — verify the gem follows Zeitwerk naming conventions
 
 ## License

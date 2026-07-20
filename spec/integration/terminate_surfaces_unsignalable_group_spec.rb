@@ -3,6 +3,8 @@ RSpec.describe Holder::Handle do
     after(:all) { UnsignalableCommand.remove }
 
     it "surfaces the permission error instead of hanging or reporting a clean teardown" do
+      skip "EPERM from a group signal means gone here, not unsignalable" if Holder::Handle::EPERM_MEANS_GONE
+
       command = UnsignalableCommand.path
       skip "host cannot host a setuid-root helper (needs a non-root uid, cc, passwordless sudo)" unless command
 

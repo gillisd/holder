@@ -24,4 +24,4 @@ namespace :zeitwerk do
   end
 end
 
-task default: [:test, :rubocop]
+task default: [:test, :spec, :rubocop]
