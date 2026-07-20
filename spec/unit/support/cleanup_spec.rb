@@ -27,21 +27,26 @@ RSpec.describe Cleanup do
       expect(removed_paths).to eq(["second", "first"])
     end
 
-    it "keeps undoing the rest after one action raises" do
+    context "when one deferred action raises" do
       # Teardown is best-effort: a pid already reaped, an IO already closed or a
       # path already gone must never strand the actions registered beneath it.
-      allow(FileUtils).to receive(:remove_entry).with(String) do |path|
-        raise "boom" if path == "explode"
+      before do
+        allow(FileUtils).to receive(:remove_entry).with(String) do |path|
+          raise "boom" if path == "explode"
 
-        removed_paths << path
+          removed_paths << path
+        end
       end
-      cleanup.path("bottom")
-      cleanup.path("explode")
-      cleanup.path("top")
 
-      cleanup.run
+      it "keeps undoing the rest" do
+        cleanup.path("bottom")
+        cleanup.path("explode")
+        cleanup.path("top")
 
-      expect(removed_paths).to eq(["top", "bottom"])
+        cleanup.run
+
+        expect(removed_paths).to eq(["top", "bottom"])
+      end
     end
   end
 

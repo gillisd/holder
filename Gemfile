@@ -4,13 +4,10 @@ gemspec
 
 gem "gempilot", require: false
 gem "irb"
-gem "minitest"
-gem "minitest-mock"
-gem "minitest-reporters"
 gem "rake"
 gem "rspec"
 gem "rubocop"
 gem "rubocop-claude"
-gem "rubocop-minitest"
 gem "rubocop-performance"
 gem "rubocop-rake"
+gem "rubocop-rspec"

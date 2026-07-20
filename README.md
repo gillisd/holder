@@ -188,11 +188,20 @@ off and the discarded output surfaces as a `StalledSinkError` in `#pump_error`
 
 After checking out the repo, run `bundle install` to install dependencies. Then:
 
-- `rake test` — run the minitest suite
-- `rake spec` — run the RSpec integration specs
+- `rake spec` — run the whole suite
+- `rake spec:unit` — the fast tier only (`spec/unit`): pure logic, no child
+  processes, and a hard 1-second per-example budget. This is the edit-run loop.
+- `rake spec:integration` — the slow tier only (`spec/integration`): real
+  children, real signals, timing budgets
 - `rake rubocop` — run the linter
-- `rake` — run all three (the default task)
+- `rake` — spec then rubocop (the default task)
 - `rake zeitwerk:validate` — verify the gem follows Zeitwerk naming conventions
+
+Specs are tiered by cost, not by subject. A `spec/unit` example must stay
+sub-second and spawn nothing; an example that needs a real child belongs in
+`spec/integration`, where the watchdog is a hang catcher rather than an
+assertion — anything a budget would have bounded implicitly is stated as an
+explicit expectation instead.
 
 ## License
 

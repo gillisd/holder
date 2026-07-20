@@ -3,22 +3,15 @@ require "open3"
 require "stringio"
 require "timeout"
 
-# Reuse the minitest suite's support classes (Cleanup, ProcessProbe, Clock,
-# AlwaysFailingWriter) -- one per file under test/support -- so the specs and the
-# tests share one set of process-wrangling primitives. Eager-load up front so a
-# missing or misnamed support file fails at boot, not partway through a run.
+# The support classes and helper modules are autoloaded by their own Zeitwerk
+# loader, exactly as the gem's own constants are -- no requires per file.
+# Eager-loaded up front so a missing or misnamed support file fails at boot
+# rather than partway through a run.
 require "zeitwerk"
 support_loader = Zeitwerk::Loader.new
-support_loader.push_dir(File.expand_path("../test/support", __dir__))
+support_loader.push_dir(File.expand_path("support", __dir__))
 support_loader.setup
 support_loader.eager_load
-
-require_relative "support/example_cleanup"
-require_relative "support/handle_helpers"
-require_relative "support/io_helpers"
-require_relative "support/process_helpers"
-require_relative "support/unsignalable_command"
-require_relative "support/watchdog"
 
 RSpec.configure do |config|
   config.include ExampleCleanup

@@ -34,7 +34,7 @@ class Cleanup
     # Best-effort teardown: one action failing (a pid already reaped, an IO
     # already closed, a path already gone) must never stop the rest from running,
     # so every error is deliberately swallowed -- the contract verified by
-    # CleanupTest#test_run_continues_after_an_action_raises.
+    # "#run when one deferred action raises keeps undoing the rest".
     @deferred.reverse_each do |action|
       begin
         action.call

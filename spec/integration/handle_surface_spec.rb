@@ -1,4 +1,4 @@
-RSpec.describe Holder::Handle do
+RSpec.describe "the surface a handle exposes to its caller" do
   describe "#stdout" do
     # The point of running without a block: the handle outlives the call, so the
     # caller still has a readable stdout to pull the child's output from.

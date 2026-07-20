@@ -1,4 +1,4 @@
-RSpec.describe Holder::Handle do
+RSpec.describe "choosing the first signal a child is torn down with" do
   describe "#terminate" do
     it "returns a status for a child that has already exited" do
       handle = spawn_process("true")

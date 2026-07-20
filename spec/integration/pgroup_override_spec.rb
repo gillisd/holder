@@ -22,8 +22,10 @@ RSpec.describe "refusing a caller's pgroup: override" do
       end
     end
 
+    # fetch, not [], so the example cannot pass by comparing two nils if the
+    # staging above ever stops populating the hash.
     it "keeps the child leading its own process group" do
-      expect(child_identity[:pgid]).to eq(child_identity[:pid])
+      expect(child_identity[:pgid]).to eq(child_identity.fetch(:pid))
     end
   end
 end
