@@ -15,11 +15,20 @@ class HolderTest < Minitest::Test # rubocop:disable Metrics/ClassLength
   # these reliably means the suite runs without parallelize_me!.
 
   TEST_TIMEOUT = 3
+  # The leak hunts churn LEAK_CYCLES full spawn/teardown cycles three ways over
+  # -- legitimate work that outgrows the tight per-test leash on a loaded CI
+  # runner (macOS runners have tipped past 3s on scheduling variance alone), so
+  # they get a budget sized to the churn while still catching a genuine wedge.
+  CHURN_TIMEOUT = 10
   LEAK_CYCLES = 30
   OUTLIVES_TEST = 300
 
   def capture_exceptions(&)
-    super { Timeout.timeout(TEST_TIMEOUT, &) }
+    super { Timeout.timeout(timeout_budget, &) }
+  end
+
+  def timeout_budget
+    name.include?("across_cycles") ? CHURN_TIMEOUT : TEST_TIMEOUT
   end
 
   def setup
