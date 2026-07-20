@@ -88,17 +88,40 @@ module Holder
       )
     end
 
+    # The pump's value is its failure report: nil for a clean copy (or one cut
+    # short by teardown races), otherwise the first error worth surfacing --
+    # copying outranks closing, since a failed copy is the earlier cause. The
+    # close lives in an ensure so a pump killed mid-copy still closes its pipe;
+    # a killed pump never reaches the trailing expression, so its value stays
+    # nil as reap_pumps expects.
     def pump(src, destination, close_after: false)
       Thread.new do
-        IO.copy_stream(src, destination)
-        nil
-      rescue IOError, Errno::EPIPE, Errno::EBADF
-        nil # source/dest torn down underneath us (the EPIPE Open3.capture3 swallows)
-      rescue StandardError => e
-        e # unexpected (e.g. ENOSPC writing a redirect); capture so teardown finishes
-      ensure
-        destination.close if close_after && !destination.closed?
+        error = nil
+        begin
+          error = copy_error(src, destination)
+        ensure
+          error ||= (close_error(destination) if close_after)
+        end
+        error
       end
+    end
+
+    def copy_error(src, destination)
+      IO.copy_stream(src, destination)
+      nil
+    rescue IOError, Errno::EPIPE, Errno::EBADF
+      nil # source/dest torn down underneath us (the EPIPE Open3.capture3 swallows)
+    rescue StandardError => e
+      e # unexpected (e.g. ENOSPC writing a redirect); capture so teardown finishes
+    end
+
+    def close_error(destination)
+      destination.close unless destination.closed?
+      nil
+    rescue IOError, Errno::EPIPE, Errno::EBADF
+      nil # already torn down underneath us, same as a copy hitting a closed pipe
+    rescue StandardError => e
+      e # a close that lost buffered writes; capture so teardown finishes
     end
   end
 end
