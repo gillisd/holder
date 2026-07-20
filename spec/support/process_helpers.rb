@@ -1,37 +1,65 @@
 ##
-# Helpers for driving real child processes in the integration specs: spawning a
-# tenant whose teardown is deferred to the shared Cleanup, and building pipes
-# that model a slow or wedged +out:+ sink.
+# Drives real child processes: spawning a tenant whose teardown is deferred to
+# the example's +cleanup+, reading a grandchild's pid off a pipe, waiting out an
+# exit, timing a teardown, and churning whole spawn/teardown cycles for the leak
+# hunts.
 module ProcessHelpers
-  def cleanup
-    @cleanup ||= Cleanup.new
-  end
-
   def spawn_process(*cmd, **kwargs)
     cleanup.process(Holder::Tenant.new(*cmd, **kwargs).run)
   end
 
-  def make_pipe
-    IO.pipe.each { |io| cleanup.io(io) }
+  # Read a pid a child printed and confirm it is really running before a spec
+  # asserts anything about killing it -- a spec that "killed" an already-dead
+  # grandchild proves nothing.
+  def live_pid_from(io)
+    pid = cleanup.pid(io.gets.to_i)
+    expect(ProcessProbe.new(pid)).to be_alive
+
+    pid
   end
 
-  # Stuff a pipe's write end until it would block, so the next blocking write
-  # into it -- like a pump delivering child output -- stalls until it is drained.
-  def fill_pipe(writer)
-    chunk = "x" * 4096
-    loop { break unless writer.write_nonblock(chunk, exception: false).is_a?(Integer) }
+  def wait_for_exit(pid)
+    probe = ProcessProbe.new(pid)
+    sleep 0.02 while probe.alive?
   end
 
-  # Drain a wedged sink's read end until +text+ arrives, freeing a pump blocked
-  # on writing into it; raises if +patience+ runs out first.
-  def drain_until(reader, text, patience: 5)
-    deadline = Clock.monotonic + patience
-    buffer = +""
-    until buffer.include?(text)
-      raise "sink saw #{buffer.bytesize} bytes but never #{text.inspect}" if Clock.monotonic > deadline
+  def elapsed
+    start = Clock.monotonic
+    yield
+    Clock.monotonic - start
+  end
 
-      buffer << reader.readpartial(65_536) if reader.wait_readable(0.1)
-    end
-    buffer
+  def error_raised_in_thread
+    Thread.new do
+      yield
+      nil
+    rescue StandardError => e
+      e
+    end.value
+  end
+
+  # Full spawn/teardown cycles three ways over -- piped, out: redirected, in:
+  # redirected -- so a descriptor or thread the handle forgets to release shows
+  # up as growth against the process-global counts the leak specs sample.
+  def churn_processes(count)
+    count.times { churn_piped_cycle }
+    count.times { churn_out_redirect_cycle }
+    count.times { churn_in_redirect_cycle }
+  end
+
+  def churn_piped_cycle
+    Holder::Tenant.new("sh", "-c", "echo hi").run { |handle| handle.stdout.read }
+  end
+
+  def churn_out_redirect_cycle
+    file = open_tmp("w")
+    Holder::Tenant.new("sh", "-c", "echo hi", out: file).run(&:wait)
+    file.close
+  end
+
+  def churn_in_redirect_cycle
+    source = input_io("x\n")
+    Holder::Tenant.new("cat", in: source).run { |handle| handle.stdout.read }
+    source.close
   end
 end

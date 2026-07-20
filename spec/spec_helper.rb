@@ -13,11 +13,35 @@ support_loader.push_dir(File.expand_path("../test/support", __dir__))
 support_loader.setup
 support_loader.eager_load
 
+require_relative "support/example_cleanup"
+require_relative "support/handle_helpers"
+require_relative "support/io_helpers"
 require_relative "support/process_helpers"
 require_relative "support/unsignalable_command"
+require_relative "support/watchdog"
 
 RSpec.configure do |config|
+  config.include ExampleCleanup
+  config.include HandleHelpers
+  config.include IoHelpers
   config.include ProcessHelpers
+
+  # The directory is the tier: spec/unit is the fast floor, spec/integration
+  # stages real children. Watchdog turns that into each example's time budget.
+  config.define_derived_metadata(file_path: %r{/spec/unit/}) { |metadata| metadata[:tier] = :unit }
+  config.define_derived_metadata(file_path: %r{/spec/integration/}) { |metadata| metadata[:tier] = :integration }
+
+  # A nil exception class is deliberate: Timeout then raises its ExitException,
+  # which is not a StandardError, so an example wedged inside a `rescue` cannot
+  # swallow its own watchdog.
+  config.around do |example|
+    budget = Watchdog.budget(example.metadata)
+    Timeout.timeout(budget, nil, "example exceeded its #{example.metadata[:tier]} budget of #{budget}s") do
+      example.run
+    end
+  end
+
+  config.after { @cleanup&.run }
 
   config.expect_with :rspec do |expectations|
     expectations.include_chain_clauses_in_custom_matcher_descriptions = true
@@ -29,6 +53,4 @@ RSpec.configure do |config|
   config.disable_monkey_patching!
   config.order = :random
   config.example_status_persistence_file_path = ".rspec_status"
-
-  config.after { @cleanup&.run }
 end
