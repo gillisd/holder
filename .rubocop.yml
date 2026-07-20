@@ -150,7 +150,6 @@ Style/ClassAndModuleChildren:
 Style/Documentation:
   Enabled: true
   Exclude:
-    - "test/**/*"
     - "spec/**/*"
 
 # Trailing commas in multiline literals and arguments.

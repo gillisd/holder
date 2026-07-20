@@ -27,6 +27,49 @@ It leans on ruby's own open3 library, whilst handling the parts that open3 doesn
 
 7. **"Done" means done**, as defined in the next section.
 
+8. **Specs are tiered by cost, and the tier decides everything else**, as defined in the Testing section.
+
+## Testing
+
+RSpec only. Two tiers, and which one a spec belongs to is decided by what it
+costs to run, never by what it is about.
+
+**`spec/unit`** — pure logic. Spawns no child, sleeps for nothing, asserts no
+duration. Held to a hard one-second budget that an example may lower and may
+never raise: an example that wants longer is an integration example in the wrong
+directory. These describe a **class**, and the file path has to match it
+(`describe Holder::Tenant` lives at `spec/unit/holder/tenant_*_spec.rb`).
+
+**`spec/integration`** — real children, real signals, host-dependent fixtures.
+These describe a **behaviour in prose** (`RSpec.describe "tearing down a process
+group"`), because the subject is a behaviour and several files legitimately
+drive the same class from different angles.
+
+Rules that follow from the split:
+
+- **The watchdog is a backstop, not an assertion.** Its job is to stop a wedged
+  example, and its default is deliberately tight enough to also bound teardown
+  itself — most teardown examples assert liveness only *after* `terminate`
+  returns, so the budget is the only thing bounding how long `terminate` may
+  take. Do not loosen it to make something pass. An example whose own scripted
+  work approaches the budget states a bigger one with `it "...", timeout: 8`,
+  **and** asserts explicitly whatever the budget had been bounding implicitly.
+- **A timing contract is an expectation, never a budget.** "Teardown returns
+  within `PUMP_GRACE + 2`" is `expect(elapsed { ... }).to be < ...`.
+- **Never loosen a cop to make a spec pass.** A `RSpec/ExampleLength`,
+  `MultipleExpectations` or `SpecFilePathFormat` offence means the spec is not
+  fine-grained enough: split the example per contract, lift staging into a named
+  helper, or split the file. `:aggregate_failures` is for facets of one
+  genuinely expensive staged scenario, not for dodging a split.
+- **Nothing survives an example.** Every child, pipe, tmpfile and path is
+  registered with `cleanup` so it is undone even when the example fails.
+- Support classes and helper modules live in `spec/support` and are
+  Zeitwerk-autoloaded, exactly as the gem's own constants are.
+
+**A ported or refactored spec has never been seen to fail, so it has not been
+tested.** Before trusting one, re-introduce the regression it exists to catch
+and watch it go red.
+
 ## Definition of "done"
 
 A task is not done until every loose end is taken care of. Do not stop with outstanding follow-ups, deferred fixes, or "still pending" items — finish them as part of the task.

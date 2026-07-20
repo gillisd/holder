@@ -45,5 +45,9 @@ RSpec.configure do |config|
 
   config.disable_monkey_patching!
   config.order = :random
+
+  # Progress for a whole run, where 94 example names are noise; the full
+  # documentation tree when you are running a single file and reading it.
+  config.default_formatter = config.files_to_run.one? ? "doc" : "progress"
   config.example_status_persistence_file_path = ".rspec_status"
 end
