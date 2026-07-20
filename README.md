@@ -144,10 +144,10 @@ Holder::Tenant.new("git", "log", "--oneline", "-5", out: $stdout, chdir: "/path/
 | --- | --- |
 | `#pid` | the child's process id |
 | `#stdin` / `#stdout` / `#stderr` | the pipe for a stream you did **not** redirect, otherwise `nil` |
-| `#wait` | block until the child exits on its own, reap group leftovers, deliver a redirected `out:` to the last byte, and return its `Process::Status` |
+| `#wait(drain_grace: 2)` | block until the child exits on its own, reap group leftovers, give a redirected `out:` up to `drain_grace` seconds to finish draining, and return the child's `Process::Status` |
 | `#terminate(grace: 5)` | `SIGTERM` the group, wait `grace` seconds, then `SIGKILL`; reap and close pipes. Returns the `Process::Status` |
 | `#interrupt(grace: 5)` | same as `#terminate` but the first signal is `SIGINT` |
-| `#pump_error` | the unexpected error a redirect pump hit (e.g. `ENOSPC`), or `nil`, available after teardown; when both pumps fail, the output-losing (drain) error wins |
+| `#pump_error` | the unexpected error a redirect pump hit (e.g. `ENOSPC`) — or a `StalledSinkError` when `#wait` gave up on an `out:` sink that would not drain — else `nil`; available after teardown. When both pumps fail, the output-losing (drain) error wins |
 
 `#terminate`, `#interrupt`, and `#wait` are idempotent, thread-safe, and may be
 called from any thread; calling `#terminate` twice returns the same status.
@@ -157,7 +157,9 @@ caller's longer grace.
 
 ### `Holder::Error`
 
-Base error class for the gem.
+Base error class for the gem. Its one subclass, `Holder::StalledSinkError`, is
+what `#pump_error` reports when `#wait` gave up on an `out:` sink that would
+not drain.
 
 ## How teardown works
 
@@ -174,10 +176,13 @@ Base error class for the gem.
    **not** closed — you opened them, so you close them.
 
 `#wait` differs in two ways: it sends no first signal (group leftovers found
-after the leader's own exit are killed outright), and it never deadline-kills
-the `out:` drain — a child that exited on its own gets its redirected output
-delivered in full, however slow the sink. Bound that delivery by calling
-`#terminate` instead.
+after the leader's own exit are killed outright), and it is far more patient
+with the `out:` drain — a child that exited on its own gets `drain_grace`
+seconds (default 2, versus teardown's 1-second `PUMP_GRACE`) for its redirected
+output to finish draining, and a healthy-but-slower sink can be granted more.
+A sink that still hasn't drained by then cannot wedge `#wait`: the drain is cut
+off and the discarded output surfaces as a `StalledSinkError` in `#pump_error`
+— never a silent truncation.
 
 ## Development
 
