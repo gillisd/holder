@@ -1,9 +1,9 @@
-RSpec.describe Holder::Handle do
+RSpec.describe "bounding a wait whose out: sink refuses to drain" do
   # Budgets sized to the scripted drain windows rather than the tier default:
   # each example deliberately sits out a WAIT_DRAIN_GRACE. Nothing is lost by
   # that -- the bound each example actually asserts is the explicit
   # Timeout.timeout inside it, not the watchdog.
-  describe "#wait when the redirected out: sink can never accept the child's output", timeout: 8 do
+  describe "a sink that can never accept the child's output", timeout: 8 do
     let(:reader_and_writer) { make_pipe }
     let(:writer) { reader_and_writer.last }
 
@@ -29,19 +29,23 @@ RSpec.describe Holder::Handle do
     end
   end
 
-  describe "#wait when the redirected out: sink drains, but slower than the default bound", timeout: 12 do
+  describe "a sink that drains, but slower than the default bound", timeout: 12 do
     let(:reader_and_writer) { make_pipe }
     let(:reader) { reader_and_writer.first }
     let(:writer) { reader_and_writer.last }
+    let(:handle) { spawn_process("sh", "-c", "echo blocked", out: writer) }
 
-    before { fill_pipe(writer) }
+    # Thread.new takes the handle as an argument so the child is spawned on the
+    # example's own thread, before the drain window opens.
+    let(:waiter) { Thread.new(handle) { |wedged| wedged.wait(drain_grace: 30) } }
+
+    before do
+      fill_pipe(writer)
+      waiter.join(Holder::Handle::WAIT_DRAIN_GRACE + 0.4)
+    end
 
     it "delivers everything under a raised drain_grace instead of truncating", :aggregate_failures do
-      handle = spawn_process("sh", "-c", "echo blocked", out: writer)
-      waiter = Thread.new { handle.wait(drain_grace: 30) }
-      sleep Holder::Handle::WAIT_DRAIN_GRACE + 0.4
       expect(waiter).to be_alive
-
       delivered = drain_until(reader, "blocked")
       waiter.join
       expect(delivered).to include("blocked")
