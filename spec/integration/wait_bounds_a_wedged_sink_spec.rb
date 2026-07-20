@@ -1,5 +1,9 @@
 RSpec.describe Holder::Handle do
-  describe "#wait when the redirected out: sink can never accept the child's output" do
+  # Budgets sized to the scripted drain windows rather than the tier default:
+  # each example deliberately sits out a WAIT_DRAIN_GRACE. Nothing is lost by
+  # that -- the bound each example actually asserts is the explicit
+  # Timeout.timeout inside it, not the watchdog.
+  describe "#wait when the redirected out: sink can never accept the child's output", timeout: 8 do
     let(:reader_and_writer) { make_pipe }
     let(:writer) { reader_and_writer.last }
 
@@ -25,7 +29,7 @@ RSpec.describe Holder::Handle do
     end
   end
 
-  describe "#wait when the redirected out: sink drains, but slower than the default bound" do
+  describe "#wait when the redirected out: sink drains, but slower than the default bound", timeout: 12 do
     let(:reader_and_writer) { make_pipe }
     let(:reader) { reader_and_writer.first }
     let(:writer) { reader_and_writer.last }

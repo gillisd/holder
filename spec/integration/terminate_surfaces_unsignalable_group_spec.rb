@@ -1,5 +1,8 @@
 RSpec.describe Holder::Handle do
-  describe "#terminate when the process group is alive but cannot be signalled" do
+  # Generous budget because the fixture is built, not just spawned: the helper
+  # shells out to cc and sudo to install a setuid binary before the example can
+  # start. What terminate itself may take is bounded explicitly below.
+  describe "#terminate when the process group is alive but cannot be signalled", timeout: 60 do
     after(:all) { UnsignalableCommand.remove }
 
     it "surfaces the permission error instead of hanging or reporting a clean teardown" do

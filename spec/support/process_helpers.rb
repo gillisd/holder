@@ -4,6 +4,12 @@
 # exit, timing a teardown, and churning whole spawn/teardown cycles for the leak
 # hunts.
 module ProcessHelpers
+  # Seconds a staged child idles for. Long enough to outlive the whole example,
+  # so a child observed mid-example is unambiguously alive rather than racing
+  # its own exit -- shorten it and the teardown examples start passing because
+  # the child had already left, not because teardown worked.
+  def outlives_example = 300
+
   def spawn_process(*cmd, **kwargs)
     cleanup.process(Holder::Tenant.new(*cmd, **kwargs).run)
   end

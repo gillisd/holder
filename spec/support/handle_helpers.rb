@@ -12,8 +12,16 @@ module HandleHelpers
     wait
   end
 
+  # Constructed without a drain_pump: key at all, so the constructor default is
+  # exercised by something -- Tenant always passes it explicitly, so nothing
+  # else in the suite would notice it being made required or renamed.
   def handle_with_failed_pump(owned_ios:)
-    handle_with_pumps(pump_threads: [Thread.new { RuntimeError.new("disk full") }], owned_ios:)
+    Holder::Handle.new(
+      stdin: nil, stdout: nil, stderr: nil,
+      wait_thread: reaped_wait_thread,
+      pump_threads: [Thread.new { RuntimeError.new("disk full") }],
+      owned_ios:
+    )
   end
 
   def handle_with_pumps(pump_threads:, drain_pump: nil, owned_ios: [])
