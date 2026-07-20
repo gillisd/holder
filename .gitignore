@@ -10,3 +10,10 @@ Gemfile.lock
 *.gem
 .rspec_status
 .idea
+
+# Editor and workspace archives. Never part of the gem, and large enough that
+# sweeping one into a commit by accident is expensive to undo in an append-only
+# history -- which is exactly how one reached this repository's.
+*.tar
+*.tar.*
+*.zst
