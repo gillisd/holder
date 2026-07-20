@@ -16,12 +16,8 @@ RSpec.describe "reaping a holder's child when its host process is sent SIGTERM" 
     RUBY
   end
 
-  # The load-path entry holder itself was loaded from, so the host subprocess
-  # requires the same gem without assuming where it lives on disk.
-  let(:holder_lib) { $LOAD_PATH.find { |dir| File.exist?(File.join(dir, "holder.rb")) } }
-
   it "kills the child the host was supervising" do
-    host = spawn_process("ruby", "-I", holder_lib, "-e", block_form_host)
+    host = spawn_ruby_host(block_form_host)
     child = live_pid_from(host.stdout)
     Process.kill("TERM", host.pid)
 
