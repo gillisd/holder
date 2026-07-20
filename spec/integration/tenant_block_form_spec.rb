@@ -67,8 +67,10 @@ RSpec.describe "which side of Tenant#run owns tearing the child down" do
     end
 
     it "leaves a dropped handle's child running" do
-      # Teardown is the caller's in the no-block form, so the handle must not
-      # carry a finalizer that reaps the child behind their back.
+      # Reaping must be deterministic -- an explicit terminate/wait, or the
+      # process-exit backstop -- never a GC finalizer firing mid-run behind the
+      # caller's back. So a collected handle leaves its child running; the child
+      # goes down with the process, not with the garbage collector.
       drop_the_handle_keeping_only_its_pid
 
       expect(child).to be_alive
