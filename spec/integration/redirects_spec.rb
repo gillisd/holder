@@ -1,11 +1,16 @@
-RSpec.describe Holder::Tenant do
-  describe "#run given an in: redirect" do
-    it "feeds the child from the source until EOF" do
-      out = open_tmp("w")
-      spawn_process("sort", in: input_io("b\na\nc\n"), out: out).wait
-      out.close
+RSpec.describe "redirecting a child's standard streams and forwarding spawn kwargs" do
+  let(:sink) { open_tmp("w") }
 
-      expect(File.read(out.path).chomp).to eq("a\nb\nc")
+  def text_captured_in(file)
+    file.close
+    File.read(file.path).chomp
+  end
+
+  describe "an in: redirect" do
+    it "feeds the child from the source until EOF" do
+      spawn_process("sort", in: input_io("b\na\nc\n"), out: sink).wait
+
+      expect(text_captured_in(sink)).to eq("a\nb\nc")
     end
 
     it "still pipes the child's stdout back when no out: or err: is given" do
@@ -15,44 +20,38 @@ RSpec.describe Holder::Tenant do
     end
 
     it "routes the child's stderr to the err: file while reading from the source" do
-      err = open_tmp("w")
-      spawn_process("sh", "-c", "cat 1>&2", in: input_io("toerr\n"), err: err).wait
-      err.close
+      spawn_process("sh", "-c", "cat 1>&2", in: input_io("toerr\n"), err: sink).wait
 
-      expect(File.read(err.path).chomp).to eq("toerr")
+      expect(text_captured_in(sink)).to eq("toerr")
     end
   end
 
-  describe "#run given an out: redirect" do
+  describe "an out: redirect" do
     it "writes the child's stdout to the file" do
-      out = open_tmp("w")
-      spawn_process("sh", "-c", "echo to_file", out: out).wait
-      out.close
+      spawn_process("sh", "-c", "echo to_file", out: sink).wait
 
-      expect(File.read(out.path).chomp).to eq("to_file")
+      expect(text_captured_in(sink)).to eq("to_file")
     end
   end
 
-  describe "#run given an err: redirect" do
+  describe "an err: redirect" do
     it "writes the child's stderr to the file" do
-      err = open_tmp("w")
-      spawn_process("sh", "-c", "echo oops 1>&2", err: err).wait
-      err.close
+      spawn_process("sh", "-c", "echo oops 1>&2", err: sink).wait
 
-      expect(File.read(err.path).chomp).to eq("oops")
+      expect(text_captured_in(sink)).to eq("oops")
     end
   end
 
-  describe "#run given a chdir: spawn kwarg" do
-    it "starts the child in that directory" do
-      dir = tmpdir
-      out = open_tmp("w")
-      spawn_process("sh", "-c", "pwd", out: out, chdir: dir).wait
-      out.close
+  describe "a chdir: spawn kwarg" do
+    let(:working_directory) { tmpdir }
 
-      # Compare canonical paths: macOS resolves /tmp through the /private symlink,
-      # so the child reports /private/tmp/... while dir is /tmp/... -- same directory.
-      expect(File.realpath(File.read(out.path).strip)).to eq(File.realpath(dir))
+    # Compare canonical paths: macOS resolves /tmp through the /private symlink,
+    # so the child reports /private/tmp/... while working_directory is /tmp/... --
+    # same directory.
+    it "starts the child in that directory" do
+      spawn_process("sh", "-c", "pwd", out: sink, chdir: working_directory).wait
+
+      expect(File.realpath(text_captured_in(sink))).to eq(File.realpath(working_directory))
     end
   end
 end
