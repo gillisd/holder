@@ -47,8 +47,11 @@ RSpec.describe ProcessProbe do
 
     # 0 and -1 are not processes: to kill(2) they mean "my own group" and "every
     # process I may signal", so a probe must never report either as alive.
-    it "is false for a non-positive pid" do
+    it "is false for pid 0, which kill(2) reads as the caller's own group" do
       expect(described_class.new(0)).not_to be_alive
+    end
+
+    it "is false for pid -1, which kill(2) reads as every signalable process" do
       expect(described_class.new(-1)).not_to be_alive
     end
 
@@ -59,7 +62,11 @@ RSpec.describe ProcessProbe do
       expect(described_class.new(pid)).not_to be_alive
     end
 
-    it "is false for a zombie whose parent has not reaped it yet" do
+    # Aggregated rather than split: reaching the zombie state is what the polling
+    # buys, so "we really did stage a zombie" and "a zombie is not alive" are two
+    # facets of one staging that a split would have to pay for twice -- and the
+    # second example would then trust an unasserted precondition.
+    it "is false for a zombie whose parent has not reaped it yet", :aggregate_failures do
       probe = zombie_probe_for(spawn_child("true"))
 
       expect(probe).to be_zombie
