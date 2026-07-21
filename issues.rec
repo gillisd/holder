@@ -1,0 +1,16 @@
+%rec: Issue
+%key: Id
+%typedef: Status_t enum open in_progress closed
+%type: Id uuid
+%type: Title line
+%typedef: text_t regexp /^.*$/
+%type: Description text_t
+%type: Created date
+%type: Status Status_t
+%auto: Id Created
+
+Id: 45DDA386-849A-11F1-B018-FE6CB9572C2F
+Created: Mon, 20 Jul 2026 20:22:35 -0400
+Title: CLAUDE.md should NOT be packaged with gem
+Description: why is this happening
+Status: open
