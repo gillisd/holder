@@ -7,7 +7,7 @@ Gem::Specification.new do |spec|
   spec.email = ["david@flipmine.com"]
   spec.summary = "A process supervisor that ensures no child is left behind"
   spec.license = "MIT"
-  spec.required_ruby_version = ">= 4.0.1"
+  spec.required_ruby_version = ">= 3.4.8"
 
   gemspec_file = File.basename(__FILE__)
   files = IO.popen(["git", "ls-files", "-z"], chdir: __dir__, err: IO::NULL) { |ls|
