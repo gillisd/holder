@@ -14,6 +14,19 @@ module ProcessHelpers
     cleanup.process(Holder::Tenant.new(*cmd, **kwargs).run)
   end
 
+  # Stage a real ruby host process running +holder_program+ (ruby source that
+  # uses Holder), with the gem on its load path so it can require it. The host's
+  # stdout is where it prints the supervised child's pid for the example to probe.
+  def spawn_ruby_host(holder_program)
+    spawn_process("ruby", "-I", holder_lib, "-e", holder_program)
+  end
+
+  # The load-path entry holder itself was loaded from, so a host subprocess
+  # requires the same gem without assuming where it lives on disk.
+  def holder_lib
+    $LOAD_PATH.find { |dir| File.exist?(File.join(dir, "holder.rb")) }
+  end
+
   # Read a pid a child printed and confirm it is really running before a spec
   # asserts anything about killing it -- a spec that "killed" an already-dead
   # grandchild proves nothing.
